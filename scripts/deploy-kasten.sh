@@ -81,6 +81,14 @@ for cluster in "${CLUSTERS[@]}"; do
   helm repo add kasten https://charts.kasten.io/ >/dev/null
   helm repo update kasten >/dev/null
 
+  echo "-> applying Kasten CRDs (required before creating Profiles)"
+  helm template k10 kasten/k10 \
+    --namespace "$K10_NAMESPACE" \
+    --include-crds \
+    | kubectl --context "$ctx" apply -f -
+  # ----------------------------------------------------------
+
+
   echo "-> installing k10 (version ${K10_VERSION:-latest})"
   if helm status k10 -n "$K10_NAMESPACE" --kube-context "$ctx" >/dev/null 2>&1; then
     echo "   k10 already installed — upgrading"
