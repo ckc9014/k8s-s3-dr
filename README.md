@@ -57,7 +57,7 @@ backed up by Kasten K10 to AWS S3, validated end to end.
 Quick install check:
 
 ```bash
-for t in kind kubectl helm terraform aws jq envsubst dos2unix make; do
+for t in kind kubectl helm terraform aws jq envsubst make; do
   command -v "$t" >/dev/null && echo "OK: $t" || echo "MISSING: $t"
 done
 ```
