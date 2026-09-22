@@ -68,12 +68,11 @@ done
 
 ```bash
 git clone https://github.com/ckc9014/k8s-s3-dr.git
-cd k8s-s3-dr
 
 aws configure sso
 # SSO session name:   my-sso
 # SSO start URL:      <your org's portal URL>
-# SSO region:         us-east-1
+# SSO region:         Where IAM Identity Center is configured
 # CLI default region: eu-west-1
 # Profile name:       k8s-dr-eu
 ```
@@ -81,7 +80,7 @@ aws configure sso
 Verify:
 
 ```bash
-aws configure list-profiles          # → k8s-dr-eu
+aws configure list-profiles         
 aws sso login --profile k8s-dr-eu
 aws sts get-caller-identity --profile k8s-dr-eu
 ```
