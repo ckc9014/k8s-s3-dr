@@ -110,7 +110,7 @@ In the AWS Console:
 
 1. **IAM → Users → Create user** named `kasten-s3-backup`
 2. **No console access** (programmatic only)
-3. Attach an inline policies (s3)
+3. Attach policies (s3)
 4. **Security credentials → Create access key**
 5. Copy both keys into `.env`
 
