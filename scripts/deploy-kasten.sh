@@ -30,7 +30,7 @@ fi
 # shellcheck disable=SC1091
 [ -f .env ] && set -a && source .env && set +a
 
-# Export values that envsubst will inject into the manifest
+# Resolve values from Terraform output + .env
 BUCKET_NAME=$(jq -r '.bucket_name.value' "$TF_OUTPUT")
 export BUCKET_NAME
 
@@ -60,9 +60,7 @@ echo "Deploying Kasten K10 to: ${CLUSTERS[*]}"
 echo "  bucket:  ${BUCKET_NAME}"
 echo "  region:  ${AWS_REGION}"
 
-# ---- pre-flight: verify contexts and create namespaces on ALL clusters ----
-# Done up-front so a failure on one cluster doesn't leave another without
-# its namespace (set -e would otherwise exit the loop early).
+# ---- pre-flight: verify contexts + create namespaces on ALL clusters ------
 echo ""
 echo "==> Pre-flight: verifying contexts + creating namespaces"
 for cluster in "${CLUSTERS[@]}"; do
@@ -88,17 +86,9 @@ for cluster in "${CLUSTERS[@]}"; do
   helm repo add kasten https://charts.kasten.io/ >/dev/null 2>&1 || true
   helm repo update kasten >/dev/null
 
-  # 2. CRDs + chart manifests (server-side, force ownership) ---------------
-  # This ensures CRDs exist and Helm owns the fields, so a follow-up
-  # `helm install` / `helm upgrade` doesn't hit a field-ownership conflict
-  # from earlier kubectl applies.
-  echo "-> applying Kasten CRDs + chart manifests"
-  helm template k10 kasten/k10 \
-    --namespace "$K10_NAMESPACE" \
-    --include-crds \
-    | kubectl --context "$ctx" apply --server-side --force-conflicts --field-manager=helm -f -
-
-  # 3. Helm install / upgrade ---------------------------------------------
+  # 2. Helm install / upgrade ---------------------------------------------
+  # CRDs ship inside the chart and install automatically — do NOT pre-apply
+  # them with kubectl, that causes field-manager conflicts on re-runs.
   echo "-> installing k10 (version ${K10_VERSION:-latest})"
   if helm status k10 -n "$K10_NAMESPACE" --kube-context "$ctx" >/dev/null 2>&1; then
     echo "   k10 already installed — upgrading"
@@ -115,12 +105,12 @@ for cluster in "${CLUSTERS[@]}"; do
       -f "$K10_VALUES"
   fi
 
-  # 4. Wait for the gateway to come up -------------------------------------
+  # 3. Wait for gateway ----------------------------------------------------
   echo "-> waiting for k10 gateway"
   kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
     deploy/gateway --timeout=300s
 
-  # 5. Location Profile + S3 secret (templated with envsubst) --------------
+  # 4. Location Profile + S3 secret (templated with envsubst) --------------
   echo "-> applying Location Profile (bucket=${BUCKET_NAME}, region=${AWS_REGION})"
   envsubst < "$K10_PROFILE" | kubectl --context "$ctx" apply -f -
 
