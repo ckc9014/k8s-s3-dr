@@ -81,7 +81,7 @@ list: ## List Kind clusters
 ##@ Bootstrap
 
 bootstrap: ## Install CSI snapshot stack + VolumeSnapshotClass on both clusters
-	$(SCRIPTS)/bootstrap-cluster.sh $(CLUSTERS)
+	$(SCRIPTS)/bootstrap-clusters.sh $(CLUSTERS)
 
 ##@ Terraform (AWS S3 + SQS + Lambda)
 
