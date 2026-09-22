@@ -3,8 +3,8 @@
 # Install the CSI snapshot stack on one or more Kind clusters.
 #
 # What it does:
-#   1. Installs snapshot CRDs + snapshot controller
-#   2. Installs the CSI hostpath driver (snapshot-capable StorageClass)
+#   1. Installs snapshot CRDs + snapshot controller (external-snapshotter)
+#   2. Installs the CSI hostpath driver via the official deploy.sh
 #   3. Creates a VolumeSnapshotClass annotated for Kasten
 #
 # Usage:
@@ -14,11 +14,18 @@
 set -euo pipefail
 
 # ---- config ---------------------------------------------------------------
-SNAPSHOT_VERSION="${SNAPSHOT_VERSION:-v8.0.1}"
-CSI_DRIVER_VERSION="${CSI_DRIVER_VERSION:-v1.11.0}"
+# Informational version (external-snapshotter). The raw URLs use a branch.
+SNAPSHOT_VERSION="${SNAPSHOT_VERSION:-v8.0.2}"
+SNAPSHOTTER_BRANCH="${SNAPSHOTTER_BRANCH:-release-8.0}"
+
+# csi-driver-host-path tag. `master` works but you can pin (e.g. v1.15.0).
+CSI_DRIVER_VERSION="${CSI_DRIVER_VERSION:-master}"
+
 SNAPSHOT_CLASS_NAME="${SNAPSHOT_CLASS_NAME:-kasten-snapshotclass}"
 
-# Args: cluster names (without "kind-" prefix). Fall back to CLUSTERS env.
+SNAPSHOTTER_RAW="https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${SNAPSHOTTER_BRANCH}"
+
+# ---- resolve cluster list -------------------------------------------------
 if [ $# -gt 0 ]; then
   CLUSTERS=("$@")
 elif [ -n "${CLUSTERS:-}" ]; then
@@ -29,6 +36,34 @@ else
 fi
 
 echo "Bootstrapping clusters: ${CLUSTERS[*]}"
+
+# ---- clone csi-driver-host-path once --------------------------------------
+CSI_TMP="$(mktemp -d)"
+cleanup() { rm -rf "$CSI_TMP"; }
+trap cleanup EXIT
+
+echo ""
+echo "-> cloning csi-driver-host-path (${CSI_DRIVER_VERSION})"
+if ! git clone --depth 1 --branch "${CSI_DRIVER_VERSION}" \
+      https://github.com/kubernetes-csi/csi-driver-host-path.git "$CSI_TMP" 2>/dev/null; then
+  echo "WARN: tag '${CSI_DRIVER_VERSION}' not found — falling back to master"
+  git clone --depth 1 \
+    https://github.com/kubernetes-csi/csi-driver-host-path.git "$CSI_TMP"
+fi
+
+# Pick a deploy directory — prefer kubernetes-latest, else the highest 1.x
+if [ -d "$CSI_TMP/deploy/kubernetes-latest" ]; then
+  DEPLOY_DIR="$CSI_TMP/deploy/kubernetes-latest"
+else
+  DEPLOY_DIR="$(ls -d "$CSI_TMP"/deploy/kubernetes-1.* 2>/dev/null | sort -V | tail -1)"
+fi
+
+if [ -z "${DEPLOY_DIR:-}" ] || [ ! -d "$DEPLOY_DIR" ]; then
+  echo "ERROR: no suitable deploy directory found under $CSI_TMP/deploy/"
+  ls -la "$CSI_TMP/deploy/" 2>/dev/null || true
+  exit 1
+fi
+echo "-> using deploy dir: $(basename "$DEPLOY_DIR")"
 
 # ---- per-cluster install --------------------------------------------------
 for cluster in "${CLUSTERS[@]}"; do
@@ -43,26 +78,29 @@ for cluster in "${CLUSTERS[@]}"; do
 
   # 1. Snapshot CRDs -------------------------------------------------------
   echo "-> installing snapshot CRDs (${SNAPSHOT_VERSION})"
-  kubectl --context "$ctx" apply -k \
-    "github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=${SNAPSHOT_VERSION}"
+  kubectl --context "$ctx" apply -f \
+    "${SNAPSHOTTER_RAW}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml"
+  kubectl --context "$ctx" apply -f \
+    "${SNAPSHOTTER_RAW}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml"
+  kubectl --context "$ctx" apply -f \
+    "${SNAPSHOTTER_RAW}/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml"
 
   # 2. Snapshot controller -------------------------------------------------
   echo "-> installing snapshot controller"
-  kubectl --context "$ctx" apply -k \
-    "github.com/kubernetes-csi/external-snapshotter/deploy/kubernetes/snapshot-controller?ref=${SNAPSHOT_VERSION}"
+  kubectl --context "$ctx" apply -f \
+    "${SNAPSHOTTER_RAW}/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml"
+  kubectl --context "$ctx" apply -f \
+    "${SNAPSHOTTER_RAW}/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml"
 
-  # 3. CSI hostpath driver -------------------------------------------------
-  echo "-> installing csi-hostpath-driver (${CSI_DRIVER_VERSION})"
-  kubectl --context "$ctx" apply -k \
-    "github.com/kubernetes-csi/csi-driver-host-path/deploy/kubernetes-1.31/hostpath?ref=${CSI_DRIVER_VERSION}" \
-    || {
-      echo "WARN: csi-hostpath kustomize apply failed — trying the latest deploy dir"
-      kubectl --context "$ctx" apply -k \
-        "github.com/kubernetes-csi/csi-driver-host-path/deploy/kubernetes-latest/hostpath?ref=${CSI_DRIVER_VERSION}"
-    }
+  # 3. CSI hostpath driver (official deploy.sh) ----------------------------
+  echo "-> installing csi-hostpath-driver"
+  old_ctx="$(kubectl config current-context)"
+  kubectl config use-context "$ctx" >/dev/null
+  ( cd "$DEPLOY_DIR" && ./deploy.sh )
+  kubectl config use-context "$old_ctx" >/dev/null
 
   echo "-> waiting for csi-hostpath plugin pods"
-  kubectl --context "$ctx" -n kube-system wait \
+  kubectl --context "$ctx" -n default wait \
     --for=condition=Ready pod \
     -l app.kubernetes.io/name=csi-hostpathplugin \
     --timeout=180s || true
@@ -88,3 +126,4 @@ echo "Bootstrap complete."
 echo "Verify with:"
 echo "  kubectl --context kind-${CLUSTERS[0]} get volumesnapshotclass"
 echo "  kubectl --context kind-${CLUSTERS[0]} get storageclass"
+echo "  kubectl --context kind-${CLUSTERS[0]} -n default get pods -l app.kubernetes.io/name=csi-hostpathplugin"z
