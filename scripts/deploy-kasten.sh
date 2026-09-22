@@ -96,7 +96,7 @@ for cluster in "${CLUSTERS[@]}"; do
   helm template k10 kasten/k10 \
     --namespace "$K10_NAMESPACE" \
     --include-crds \
-    | kubectl --context "$ctx" apply --server-side --force-conflicts -f -
+    | kubectl --context "$ctx" apply --server-side --force-conflicts --field-manager=helm -f -
 
   # 3. Helm install / upgrade ---------------------------------------------
   echo "-> installing k10 (version ${K10_VERSION:-latest})"
