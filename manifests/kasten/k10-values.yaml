@@ -1,8 +1,10 @@
-
+# Accept the EULA (required, or Helm refuses to install).
 eula:
   accept: true
+  company: "Personal Lab"       # ← required field
+  email: "lab@example.com"      # ← required field
 
-
+# Token-based auth for the Kasten dashboard.
 auth:
   tokenAuth:
     enabled: true
