@@ -1,0 +1,35 @@
+# Kasten Location Profile pointing at the S3 backup bucket.
+# The bucket name and region are injected by deploy-kasten.sh from
+# .tf-output.json — replace the placeholders before applying manually.
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Profile
+metadata:
+  name: s3-backup-profile
+  namespace: kasten-io
+spec:
+  type: Location
+  location:
+    type: objectStore
+    objectStore:
+
+      name: k10-s3-backups
+      region: eu-west-1                            # injected
+      bucket: REPLACE_WITH_BUCKET_NAME             # injected
+
+---
+# S3 credentials secret referenced by the Profile above.
+# Values are injected by deploy-kasten.sh from .env
+# (K10_AWS_ACCESS_KEY_ID / K10_AWS_SECRET_ACCESS_KEY).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: k10-s3-creds
+  namespace: kasten-io
+type: Opaque
+stringData:
+  k10-s3-backups:
+    |
+    {
+      "accessKeyID": "REPLACE_ME",
+      "secretAccessKey": "REPLACE_ME"
+    }

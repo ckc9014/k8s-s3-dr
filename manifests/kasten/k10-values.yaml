@@ -1,0 +1,26 @@
+
+eula:
+  accept: true
+
+
+auth:
+  tokenAuth:
+    enabled: true
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+kanister:
+  enabled: true
+
+# Uncomment for air-gapped installs
+# global:
+#   airgapped:
+#     repository: localhost:5001/kasten
+# metering:
+#   mode: airgap

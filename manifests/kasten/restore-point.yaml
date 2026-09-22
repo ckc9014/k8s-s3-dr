@@ -1,0 +1,15 @@
+# RestoreAction for cross-cluster restore.
+apiVersion: apps.kio.kasten.io/v1alpha1
+kind: RestoreAction
+metadata:
+  name: restore-mongodb
+  namespace: kasten-io
+spec:
+  subject:
+    name: mongodb
+    namespace: mongodb
+  restorePoint:
+    name: REPLACE_WITH_RESTORE_POINT_NAME
+    namespace: kasten-io
+  # Restore into the same namespace the backup came from.
+  targetNamespace: mongodb
