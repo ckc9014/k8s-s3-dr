@@ -24,7 +24,7 @@
 SHELL := /usr/bin/env bash
 
 # ---- config (override via .env or CLI) ------------------------------------
-CLUSTERS         ?= dr-lab-source dr-lab-restore
+CLUSTERS         ?= k8s-source k8s-restore
 CONFIG_PATH      ?= manifests/kind-cluster-config.yaml
 APP_NAMESPACE    ?= mongodb
 EXPECTED_DOCS    ?= 1000
