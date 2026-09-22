@@ -14,15 +14,9 @@
 set -euo pipefail
 
 # ---- config ---------------------------------------------------------------
-# Logging version (informational only)
-SNAPSHOT_VERSION="${SNAPSHOT_VERSION:-v8.0.2}"
-# Branch that the raw URLs point at — must match the version line above
-SNAPSHOTTER_BRANCH="${SNAPSHOTTER_BRANCH:-release-8.0}"
-
+SNAPSHOT_VERSION="${SNAPSHOT_VERSION:-v8.0.1}"
 CSI_DRIVER_VERSION="${CSI_DRIVER_VERSION:-v1.11.0}"
 SNAPSHOT_CLASS_NAME="${SNAPSHOT_CLASS_NAME:-kasten-snapshotclass}"
-
-SNAPSHOTTER_RAW="https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${SNAPSHOTTER_BRANCH}"
 
 # Args: cluster names (without "kind-" prefix). Fall back to CLUSTERS env.
 if [ $# -gt 0 ]; then
@@ -48,31 +42,24 @@ for cluster in "${CLUSTERS[@]}"; do
   fi
 
   # 1. Snapshot CRDs -------------------------------------------------------
-  echo "-> installing snapshot CRDs (${SNAPSHOT_VERSION}, branch ${SNAPSHOTTER_BRANCH})"
-  kubectl --context "$ctx" apply -f \
-    "${SNAPSHOTTER_RAW}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml"
-  kubectl --context "$ctx" apply -f \
-    "${SNAPSHOTTER_RAW}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml"
-  kubectl --context "$ctx" apply -f \
-    "${SNAPSHOTTER_RAW}/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml"
+  echo "-> installing snapshot CRDs (${SNAPSHOT_VERSION})"
+  kubectl --context "$ctx" apply -k \
+    "github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=${SNAPSHOT_VERSION}"
 
   # 2. Snapshot controller -------------------------------------------------
   echo "-> installing snapshot controller"
-  kubectl --context "$ctx" apply -f \
-    "${SNAPSHOTTER_RAW}/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml"
-  kubectl --context "$ctx" apply -f \
-    "${SNAPSHOTTER_RAW}/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml"
+  kubectl --context "$ctx" apply -k \
+    "github.com/kubernetes-csi/external-snapshotter/deploy/kubernetes/snapshot-controller?ref=${SNAPSHOT_VERSION}"
 
   # 3. CSI hostpath driver -------------------------------------------------
   echo "-> installing csi-hostpath-driver (${CSI_DRIVER_VERSION})"
-  # The repo publishes versioned deploy dirs for specific K8s releases plus
-  # a rolling 'kubernetes-latest' — try the latter, it's always present.
-  if ! kubectl --context "$ctx" apply -k \
-      "github.com/kubernetes-csi/csi-driver-host-path/deploy/kubernetes-latest/hostpath?ref=${CSI_DRIVER_VERSION}"; then
-    echo "WARN: apply -k failed — trying unversioned ref"
-    kubectl --context "$ctx" apply -k \
-      "github.com/kubernetes-csi/csi-driver-host-path/deploy/kubernetes-latest/hostpath"
-  fi
+  kubectl --context "$ctx" apply -k \
+    "github.com/kubernetes-csi/csi-driver-host-path/deploy/kubernetes-1.31/hostpath?ref=${CSI_DRIVER_VERSION}" \
+    || {
+      echo "WARN: csi-hostpath kustomize apply failed — trying the latest deploy dir"
+      kubectl --context "$ctx" apply -k \
+        "github.com/kubernetes-csi/csi-driver-host-path/deploy/kubernetes-latest/hostpath?ref=${CSI_DRIVER_VERSION}"
+    }
 
   echo "-> waiting for csi-hostpath plugin pods"
   kubectl --context "$ctx" -n kube-system wait \
