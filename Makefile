@@ -1,4 +1,4 @@
-﻿# =========================================================
+# =========================================================
 # k8s-s3-dr — DR lab: Kind + MongoDB + Kasten K10 + AWS S3
 # =========================================================
 # Once per session: aws sso login --profile k8s-dr-eu
@@ -125,7 +125,7 @@ seed-mongo: ## Insert EXPECTED_DOCS test documents (source cluster)
 
 ##@ Kasten
 
-deploy-kasten: terraform-apply bootstrap iam-setup ## Install K10 + profiles + policies on both clusters
+deploy-kasten: terraform-apply bootstrap iam-setup
 	$(SCRIPTS)/deploy-kasten.sh $(CLUSTERS)
 
 ##@ DR flow
@@ -173,7 +173,7 @@ validate-backup: ## Validate backup + restore + data integrity
 ##@ Orchestration
 
 e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo seed-mongo \
-     backup import-restore-points restore validate-backup ## Full end-to-end flow
+     backup import-restore-points restore validate-backup
 	@echo ""
 	@echo "✅ E2E complete — backup, restore, and validation all passed."
 
