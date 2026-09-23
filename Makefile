@@ -9,8 +9,8 @@
 #   aws sso login              # per session
 #   make e2e
 # =========================================================
-# First-time IAM setup runs automatically as part of `deploy-kasten`.
-# If you ever need to re-run it manually: make iam-setup
+# IAM setup runs automatically as part of `deploy-kasten`.
+# To run it manually: make iam-setup
 # =========================================================
 
 SHELL := /usr/bin/env bash
@@ -37,7 +37,7 @@ endif
         bootstrap \
         terraform-init terraform-plan terraform-apply \
         iam-setup vendor-crds \
-        deploy-kasten \
+        deploy-mongo deploy-kasten \
         backup restore validate-backup \
         e2e clean \
         test-lambda test-lambda-fail
@@ -123,6 +123,25 @@ vendor-crds: ## Dump Kasten CRDs from source cluster into manifests/kasten/crds/
 	@echo "Done. Commit these with:"
 	@echo "  git add manifests/kasten/crds/ && git commit -m 'feat(kasten): vendor CRDs'"
 
+##@ Workload
+
+deploy-mongo: ## Apply MongoDB manifests to the SOURCE cluster only
+	@echo "Applying MongoDB to kind-$(firstword $(CLUSTERS))..."
+	kubectl --context kind-$(firstword $(CLUSTERS)) apply -f manifests/mongodb/
+	@echo "Waiting for mongodb-0 to be Ready..."
+	kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) \
+	  wait --for=condition=Ready pod/mongodb-0 --timeout=180s
+	@echo "✅ MongoDB ready on kind-$(firstword $(CLUSTERS))"
+
+seed-mongo: ## Insert EXPECTED_DOCS test documents into MongoDB (source cluster)
+	@echo "Seeding $(EXPECTED_DOCS) documents into testdb.users..."
+	@kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) exec mongodb-0 -- \
+	  mongosh --quiet -u root -p labpassword --authenticationDatabase admin \
+	  --eval "db.getSiblingDB('testdb').users.insertMany( \
+	    Array.from({length: $(EXPECTED_DOCS)}, (_, i) => ({ _id: i, name: 'user' + i })) \
+	  )"
+	@echo "✅ Seeded $(EXPECTED_DOCS) documents"
+
 ##@ Kasten
 
 deploy-kasten: terraform-apply bootstrap iam-setup ## Install Kasten K10 + S3 profile (auto-runs IAM setup)
@@ -156,7 +175,7 @@ validate-backup: ## Validate latest backup + restore + data
 
 ##@ Orchestration
 
-e2e: cluster terraform-apply bootstrap deploy-kasten backup restore validate-backup ## Full end-to-end flow (fresh-clone safe)
+e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo seed-mongo backup restore validate-backup ## Full end-to-end flow
 	@echo ""
 	@echo "✅ E2E complete — backup, restore, and validation all passed."
 
