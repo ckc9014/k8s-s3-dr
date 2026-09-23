@@ -150,11 +150,23 @@ deploy-kasten: terraform-apply bootstrap iam-setup ## Install Kasten K10 + S3 pr
 ##@ DR flow
 
 backup: ## Trigger an immediate Kasten backup on the source cluster
-	@echo "Triggering backup via policy annotation..."
-	@kubectl --context kind-$(firstword $(CLUSTERS)) -n kasten-io \
-	  annotate policy mongodb-backup k10.kasten.io/run-now=true --overwrite
+	@echo "Triggering backup via RunAction..."
+	@NAME="manual-run-$$(date +%s)"; \
+	kubectl --context kind-$(firstword $(CLUSTERS)) apply -f - <<EOF; \
+	apiVersion: actions.kio.kasten.io/v1alpha1
+	kind: RunAction
+	metadata:
+	  name: $${NAME}
+	  namespace: kasten-io
+	spec:
+	  subject:
+	    apiVersion: config.kio.kasten.io/v1alpha1
+	    kind: Policy
+	    name: mongodb-backup
+	    namespace: kasten-io
+	EOF
 	@echo "Waiting for BackupAction to complete..."
-	@bash -c 'for i in $$(seq 1 60); do \
+	@bash -c 'for i in $$(seq 1 120); do \
 	  latest=$$(kubectl --context kind-$(firstword $(CLUSTERS)) -n kasten-io get backupactions \
 	    --sort-by=.metadata.creationTimestamp -o jsonpath="{.items[-1].metadata.name}" 2>/dev/null || true); \
 	  if [ -n "$$latest" ]; then \
