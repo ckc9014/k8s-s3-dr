@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 #
 # Link imported RestorePointContents into RestorePoint objects in the
 # application namespace. Kasten 9.x imports create cluster-scoped

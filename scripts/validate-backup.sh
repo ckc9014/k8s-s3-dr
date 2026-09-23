@@ -2,9 +2,11 @@
 #
 # Validate the most recent Kasten backup/restore and the restored MongoDB data.
 #
-# Two checks:
-#   1. Kasten CRs on source + restore clusters are Complete
-#   2. MongoDB doc count in the restore cluster matches EXPECTED_DOCS
+# Checks:
+#   1. Latest BackupAction on source cluster is Complete
+#   2. Latest RestoreAction on restore cluster is Complete
+#   3. mongodb-0 pod is Ready in the restore cluster
+#   4. Document count in restored MongoDB matches EXPECTED_DOCS
 #
 # Usage:
 #   scripts/validate-backup.sh mongodb 1000
@@ -14,8 +16,8 @@ set -euo pipefail
 APP_NAMESPACE="${1:-mongodb}"
 EXPECTED_DOCS="${2:-1000}"
 
-SOURCE_CTX="${SOURCE_CTX:-kind-dr-lab-source}"
-RESTORE_CTX="${RESTORE_CTX:-kind-dr-lab-restore}"
+SOURCE_CTX="${SOURCE_CTX:-kind-k8s-source}"
+RESTORE_CTX="${RESTORE_CTX:-kind-k8s-restore}"
 K10_NAMESPACE="kasten-io"
 MONGO_COLLECTION="${MONGO_COLLECTION:-users}"
 MONGO_DB="${MONGO_DB:-testdb}"
@@ -25,36 +27,46 @@ ok()   { echo "✅ $*"; }
 
 # ---- helpers --------------------------------------------------------------
 latest_cr() {
-  # $1 = context, $2 = resource kind (e.g. backupactions)
-  kubectl --context "$1" -n "$K10_NAMESPACE" get "$2" \
+  # $1 = context, $2 = namespace, $3 = resource kind (plural)
+  kubectl --context "$1" -n "$2" get "$3" \
     --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || true
 }
 
-cr_phase() {
-  # $1 = context, $2 = resource kind, $3 = name
-  kubectl --context "$1" -n "$K10_NAMESPACE" get "$2" "$3" \
+cr_state() {
+  # $1 = context, $2 = namespace, $3 = resource kind, $4 = name
+  # Kasten 9.x uses .status.state (not .status.phase)
+  kubectl --context "$1" -n "$2" get "$3" "$4" \
     -o jsonpath='{.status.state}' 2>/dev/null || true
 }
 
+# ---- sanity: contexts exist -----------------------------------------------
+kubectl config get-contexts "$SOURCE_CTX"  >/dev/null 2>&1 || fail "context '$SOURCE_CTX' not found"
+kubectl config get-contexts "$RESTORE_CTX" >/dev/null 2>&1 || fail "context '$RESTORE_CTX' not found"
+
+echo "SOURCE_CTX:  ${SOURCE_CTX}"
+echo "RESTORE_CTX: ${RESTORE_CTX}"
+echo "NAMESPACE:   ${APP_NAMESPACE}"
+echo ""
+
 # ---- 1. Backup on source --------------------------------------------------
-echo "==> Checking backup on ${SOURCE_CTX}"
-BACKUP=$(latest_cr "$SOURCE_CTX" backupactions)
+echo "==> Checking backup on ${SOURCE_CTX} (namespace ${APP_NAMESPACE})"
+BACKUP=$(latest_cr "$SOURCE_CTX" "$APP_NAMESPACE" backupactions)
 [ -n "$BACKUP" ] || fail "no BackupAction found on source"
 
-BACKUP_PHASE=$(cr_phase "$SOURCE_CTX" backupactions "$BACKUP")
-echo "    BackupAction ${BACKUP}: ${BACKUP_PHASE}"
-[ "$BACKUP_PHASE" = "Complete" ] || fail "backup phase is '${BACKUP_PHASE}', expected 'Complete'"
+BACKUP_STATE=$(cr_state "$SOURCE_CTX" "$APP_NAMESPACE" backupactions "$BACKUP")
+echo "    BackupAction ${BACKUP}: ${BACKUP_STATE}"
+[ "$BACKUP_STATE" = "Complete" ] || fail "backup state is '${BACKUP_STATE}', expected 'Complete'"
 ok "backup complete"
 
-# ---- 2. Restore on restore cluster ---------------------------------------
+# ---- 2. Restore on restore cluster ----------------------------------------
 echo "==> Checking restore on ${RESTORE_CTX}"
-RESTORE=$(latest_cr "$RESTORE_CTX" restoreactions)
+RESTORE=$(latest_cr "$RESTORE_CTX" "$APP_NAMESPACE" restoreactions)
 [ -n "$RESTORE" ] || fail "no RestoreAction found on restore cluster"
 
-RESTORE_PHASE=$(cr_phase "$RESTORE_CTX" restoreactions "$RESTORE")
-echo "    RestoreAction ${RESTORE}: ${RESTORE_PHASE}"
-[ "$RESTORE_PHASE" = "Complete" ] || fail "restore phase is '${RESTORE_PHASE}', expected 'Complete'"
+RESTORE_STATE=$(cr_state "$RESTORE_CTX" "$APP_NAMESPACE" restoreactions "$RESTORE")
+echo "    RestoreAction ${RESTORE}: ${RESTORE_STATE}"
+[ "$RESTORE_STATE" = "Complete" ] || fail "restore state is '${RESTORE_STATE}', expected 'Complete'"
 ok "restore complete"
 
 # ---- 3. Mongo pod ready ---------------------------------------------------

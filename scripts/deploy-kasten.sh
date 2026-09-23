@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 #
 # Install Kasten K10 on both clusters and wire up S3 (backup + import).
 #
@@ -10,15 +10,13 @@
 # RESTORE cluster (CLUSTERS[1]):
 #   - K10 install
 #   - Location Profile
-#   - Import Policy
-#   - Triggered initial import (RestorePointContents from S3)
-#   - Link imported RestorePointContents to RestorePoints in the app namespace
-#   - Bare app namespace with Kasten label
+#   - Import Policy + triggered initial import
+#   - Link imported RestorePointContents → RestorePoints in the app namespace
+#   - Bare app namespace with Kasten discovery label
 #
 # Reads:
-#   .tf-output.json           (bucket name + region)
-#   .env                      (K10_AWS_* keys)
-#   manifests/kasten/crds/    (vendored Kasten CRDs — optional but recommended)
+#   .tf-output.json   (bucket name + region)
+#   .env              (K10_AWS_* keys)
 #
 set -euo pipefail
 
@@ -35,7 +33,6 @@ K10_PROFILE="manifests/kasten/location-profile.yaml"
 K10_BACKUP_POLICY="manifests/kasten/backup-policy.yaml"
 K10_IMPORT_POLICY="manifests/kasten/import-policy.yaml"
 K10_IMPORT_RUN_ACTION="manifests/kasten/import-run-action.yaml"
-K10_CRD_DIR="manifests/kasten/crds"
 
 if [ ! -f "$TF_OUTPUT" ]; then
   echo "ERROR: ${TF_OUTPUT} not found. Run 'make terraform-apply' first."
@@ -92,7 +89,6 @@ for cluster in "${CLUSTERS[@]}"; do
 done
 
 # Restore cluster needs the app namespace + Kasten discovery label.
-# Source cluster gets its namespace via `make deploy-mongo`.
 if [ -n "$RESTORE_CLUSTER" ]; then
   ctx="kind-${RESTORE_CLUSTER}"
   echo "-> ${ctx}: ensuring app namespace ${APP_NAMESPACE} with Kasten label"
@@ -113,38 +109,35 @@ for cluster in "${CLUSTERS[@]}"; do
   helm repo add kasten https://charts.kasten.io/ >/dev/null 2>&1 || true
   helm repo update kasten >/dev/null
 
-  # 2. Ensure Kasten CRDs are installed and established --------------------
-  if [ -d "$K10_CRD_DIR" ] && [ -n "$(ls -A "$K10_CRD_DIR" 2>/dev/null)" ]; then
-    echo "-> applying vendored Kasten CRDs from ${K10_CRD_DIR}"
-    kubectl --context "$ctx" apply --server-side --force-conflicts -f "$K10_CRD_DIR"
-  else
-    echo "-> no vendored CRDs found — relying on helm"
-  fi
-
-  echo "-> waiting for Profile CRD to be established"
-  if ! kubectl --context "$ctx" wait --for condition=established --timeout=120s \
-         crd/profiles.config.kio.kasten.io; then
-    echo "ERROR: Profile CRD not established on ${ctx}"
-    echo "       If Kasten is already installed but CRDs missing:"
-    echo "         helm uninstall k10 -n ${K10_NAMESPACE} --kube-context ${ctx}"
-    echo "         make deploy-kasten"
-    exit 1
-  fi
-
-  # 3. Helm install / upgrade ---------------------------------------------
+  # 2. Helm install / upgrade ---------------------------------------------
+  # IMPORTANT: helm installs the Kasten CRDs. We must NOT wait for CRDs
+  # before this step — they don't exist until helm runs.
   echo "-> installing k10 (version ${K10_VERSION:-latest})"
   if helm status k10 -n "$K10_NAMESPACE" --kube-context "$ctx" >/dev/null 2>&1; then
+    echo "   k10 already installed — upgrading"
     helm upgrade k10 kasten/k10 \
       --kube-context "$ctx" \
       --namespace "$K10_NAMESPACE" \
       ${K10_VERSION:+--version "$K10_VERSION"} \
       -f "$K10_VALUES"
   else
+    echo "   fresh install"
     helm install k10 kasten/k10 \
       --kube-context "$ctx" \
       --namespace "$K10_NAMESPACE" \
       ${K10_VERSION:+--version "$K10_VERSION"} \
       -f "$K10_VALUES"
+  fi
+
+  # 3. Wait for the Profile CRD to be established -------------------------
+  # Now that helm has installed them, wait for the CRD to register with the
+  # API server before trying to create any Kasten custom resources.
+  echo "-> waiting for Profile CRD to be established"
+  if ! kubectl --context "$ctx" wait --for=condition=established --timeout=180s \
+         crd/profiles.config.kio.kasten.io; then
+    echo "ERROR: Profile CRD not established on ${ctx} after helm install."
+    echo "       Check helm release: helm status k10 -n ${K10_NAMESPACE} --kube-context ${ctx}"
+    exit 1
   fi
 
   # 4. Wait for gateway ----------------------------------------------------
@@ -180,17 +173,14 @@ for cluster in "${CLUSTERS[@]}"; do
         break
       fi
       if [ "$i" -eq 60 ]; then
-        echo "   WARN: no RestorePointContents after 5 min"
-        echo "         (this is OK if you haven't run a backup yet)"
+        echo "   WARN: no RestorePointContents after 5 min (OK if no backup exists yet)"
         continue
       fi
       sleep 5
     done
 
     # Link each RestorePointContent → RestorePoint in the app namespace.
-    # Kasten 9.x doesn't create namespace-scoped RestorePoints on import;
-    # we create them manually so `kubectl -n mongodb get restorepoints` works
-    # and so RestoreActions can target them.
+    # Kasten 9.x doesn't create namespace-scoped RestorePoints on import.
     echo "-> linking RestorePointContents to RestorePoints in ${APP_NAMESPACE}"
     RPC_LIST=$(kubectl --context "$ctx" get restorepointcontents -o name 2>/dev/null || true)
     if [ -n "$RPC_LIST" ]; then

@@ -1,4 +1,4 @@
-﻿apiVersion: config.kio.kasten.io/v1alpha1
+apiVersion: config.kio.kasten.io/v1alpha1
 kind: Policy
 metadata:
   name: mongodb-import
