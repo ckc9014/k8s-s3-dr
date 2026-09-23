@@ -1,12 +1,12 @@
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RunAction
 metadata:
-  generateName: run-mongodb-backup-
+  generateName: run-mongodb-import-
   namespace: kasten-io
 spec:
   subject:
     apiVersion: config.kio.kasten.io/v1alpha1
     kind: Policy
-    name: mongodb-backup
+    name: mongodb-import
     namespace: kasten-io
-  expiresAt: "2026-10-01T00:00:00Z"
+  expiresAt: "2027-09-24T00:00:00Z"
