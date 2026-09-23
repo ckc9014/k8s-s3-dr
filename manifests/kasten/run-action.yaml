@@ -1,0 +1,11 @@
+apiVersion: actions.kio.kasten.io/v1alpha1
+kind: RunAction
+metadata:
+  name: manual-run-REPLACE_ME
+  namespace: kasten-io
+spec:
+  subject:
+    apiVersion: config.kio.kasten.io/v1alpha1
+    kind: Policy
+    name: mongodb-backup
+    namespace: kasten-io

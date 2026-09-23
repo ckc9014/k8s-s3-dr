@@ -151,21 +151,21 @@ deploy-kasten: terraform-apply bootstrap iam-setup ## Install Kasten K10 + S3 pr
 
 backup: ## Trigger an immediate Kasten backup on the source cluster
 	@echo "Triggering backup via RunAction..."
-	@kubectl --context kind-$(firstword $(CLUSTERS)) create -f - <<'EOF'
-apiVersion: actions.kio.kasten.io/v1alpha1
-kind: RunAction
-metadata:
-  generateName: manual-run-
-  namespace: kasten-io
-spec:
-  subject:
-    apiVersion: config.kio.kasten.io/v1alpha1
-    kind: Policy
-    name: mongodb-backup
-    namespace: kasten-io
-EOF
+	@NAME="manual-run-$$(date +%s)"; \
+	  sed "s/REPLACE_ME/$${NAME}/" manifests/kasten/run-action.yaml \
+	    | kubectl --context kind-$(firstword $(CLUSTERS)) create -f -
 	@echo "Waiting for BackupAction to complete..."
-	@bash -c '...'
+	@bash -c 'for i in $$(seq 1 120); do \
+	  latest=$$(kubectl --context kind-$(firstword $(CLUSTERS)) -n kasten-io get backupactions \
+	    --sort-by=.metadata.creationTimestamp -o jsonpath="{.items[-1].metadata.name}" 2>/dev/null || true); \
+	  if [ -n "$$latest" ]; then \
+	    phase=$$(kubectl --context kind-$(firstword $(CLUSTERS)) -n kasten-io get backupaction $$latest \
+	      -o jsonpath="{.status.phase}" 2>/dev/null || true); \
+	    echo "  BackupAction $$latest: $$phase"; \
+	    case "$$phase" in Complete) exit 0 ;; Failed|Aborted) exit 1 ;; esac; \
+	  fi; \
+	  sleep 5; \
+	done; echo "timed out"; exit 1'
 
 restore: ## Trigger a Kasten restore on the restore cluster
 	@echo "Triggering restore..."
