@@ -114,6 +114,12 @@ for cluster in "${CLUSTERS[@]}"; do
   echo "-> applying Location Profile (bucket=${BUCKET_NAME}, region=${AWS_REGION})"
   envsubst < "$K10_PROFILE" | kubectl --context "$ctx" apply -f -
 
+  # 5. Backup Policy — source cluster only
+  if [ "$cluster" = "${CLUSTERS[0]}" ]; then
+    echo "-> applying backup policy (source cluster only)"
+    kubectl --context "$ctx" apply -f manifests/kasten/backup-policy.yaml
+  fi
+
   echo "-> ${ctx}: done"
 done
 
