@@ -5,7 +5,8 @@
 # What it does:
 #   1. Installs snapshot CRDs + snapshot controller (external-snapshotter)
 #   2. Installs the CSI hostpath driver via the official deploy.sh
-#   3. Creates a VolumeSnapshotClass annotated for Kasten
+#   3. Creates the CSI StorageClass (csi-hostpath-sc)
+#   4. Creates a VolumeSnapshotClass annotated for Kasten
 #
 # Usage:
 #   scripts/bootstrap-clusters.sh k8s-source k8s-restore
@@ -21,6 +22,8 @@ SNAPSHOTTER_BRANCH="${SNAPSHOTTER_BRANCH:-release-8.0}"
 # csi-driver-host-path tag. `master` works but you can pin (e.g. v1.15.0).
 CSI_DRIVER_VERSION="${CSI_DRIVER_VERSION:-master}"
 
+# Names used for the StorageClass and VolumeSnapshotClass created below.
+STORAGE_CLASS_NAME="${STORAGE_CLASS_NAME:-csi-hostpath-sc}"
 SNAPSHOT_CLASS_NAME="${SNAPSHOT_CLASS_NAME:-kasten-snapshotclass}"
 
 SNAPSHOTTER_RAW="https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/${SNAPSHOTTER_BRANCH}"
@@ -105,7 +108,24 @@ for cluster in "${CLUSTERS[@]}"; do
     -l app.kubernetes.io/name=csi-hostpathplugin \
     --timeout=180s || true
 
-  # 4. VolumeSnapshotClass annotated for Kasten ----------------------------
+  # 4. CSI StorageClass ----------------------------------------------------
+  # The upstream deploy.sh doesn't always create this. Without a
+  # CSI-capable StorageClass, PVCs land on Kind's default `standard`
+  # (local-path) class, which doesn't support snapshots — and Kasten
+  # backups will fail. Create it explicitly so both clusters have it.
+  echo "-> ensuring StorageClass '${STORAGE_CLASS_NAME}'"
+  kubectl --context "$ctx" apply -f - <<EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ${STORAGE_CLASS_NAME}
+provisioner: hostpath.csi.k8s.io
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+EOF
+
+  # 5. VolumeSnapshotClass annotated for Kasten ----------------------------
   echo "-> creating VolumeSnapshotClass '${SNAPSHOT_CLASS_NAME}'"
   kubectl --context "$ctx" apply -f - <<EOF
 apiVersion: snapshot.storage.k8s.io/v1
@@ -126,4 +146,4 @@ echo "Bootstrap complete."
 echo "Verify with:"
 echo "  kubectl --context kind-${CLUSTERS[0]} get volumesnapshotclass"
 echo "  kubectl --context kind-${CLUSTERS[0]} get storageclass"
-echo "  kubectl --context kind-${CLUSTERS[0]} -n default get pods -l app.kubernetes.io/name=csi-hostpathplugin"z
+echo "  kubectl --context kind-${CLUSTERS[0]} -n default get pods -l app.kubernetes.io/name=csi-hostpathplugin"
