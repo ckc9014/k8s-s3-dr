@@ -34,7 +34,7 @@ latest_cr() {
 cr_phase() {
   # $1 = context, $2 = resource kind, $3 = name
   kubectl --context "$1" -n "$K10_NAMESPACE" get "$2" "$3" \
-    -o jsonpath='{.status.phase}' 2>/dev/null || true
+    -o jsonpath='{.status.state}' 2>/dev/null || true
 }
 
 # ---- 1. Backup on source --------------------------------------------------

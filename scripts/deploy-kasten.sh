@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 #
 # Install Kasten K10 on both clusters and wire up S3 (backup + import).
 #
@@ -11,8 +11,9 @@
 #   - K10 install
 #   - Location Profile
 #   - Import Policy
-#   - Triggered initial import (restore points show up in the app namespace)
-#   - Bare app namespace (target for future restores)
+#   - Triggered initial import (RestorePointContents from S3)
+#   - Link imported RestorePointContents to RestorePoints in the app namespace
+#   - Bare app namespace with Kasten label
 #
 # Reads:
 #   .tf-output.json           (bucket name + region)
@@ -90,13 +91,15 @@ for cluster in "${CLUSTERS[@]}"; do
     --dry-run=client -o yaml | kubectl --context "$ctx" apply -f -
 done
 
-# Restore cluster needs the app namespace to exist before import/restore.
-# Source cluster gets it via `make deploy-mongo`.
+# Restore cluster needs the app namespace + Kasten discovery label.
+# Source cluster gets its namespace via `make deploy-mongo`.
 if [ -n "$RESTORE_CLUSTER" ]; then
   ctx="kind-${RESTORE_CLUSTER}"
-  echo "-> ${ctx}: ensuring app namespace ${APP_NAMESPACE}"
+  echo "-> ${ctx}: ensuring app namespace ${APP_NAMESPACE} with Kasten label"
   kubectl --context "$ctx" create namespace "$APP_NAMESPACE" \
     --dry-run=client -o yaml | kubectl --context "$ctx" apply -f -
+  kubectl --context "$ctx" label ns "$APP_NAMESPACE" \
+    k10.kasten.io/backup=true --overwrite
 fi
 
 # ---- per-cluster install --------------------------------------------------
@@ -122,7 +125,7 @@ for cluster in "${CLUSTERS[@]}"; do
   if ! kubectl --context "$ctx" wait --for condition=established --timeout=120s \
          crd/profiles.config.kio.kasten.io; then
     echo "ERROR: Profile CRD not established on ${ctx}"
-    echo "       If Kasten already installed but CRDs missing, try:"
+    echo "       If Kasten is already installed but CRDs missing:"
     echo "         helm uninstall k10 -n ${K10_NAMESPACE} --kube-context ${ctx}"
     echo "         make deploy-kasten"
     exit 1
@@ -159,7 +162,7 @@ for cluster in "${CLUSTERS[@]}"; do
     kubectl --context "$ctx" apply -f "$K10_BACKUP_POLICY"
   fi
 
-  # 7. RESTORE cluster: Import Policy + trigger initial import -------------
+  # 7. RESTORE cluster: Import Policy + import + link restore points -------
   if [ -n "$RESTORE_CLUSTER" ] && [ "$cluster" = "$RESTORE_CLUSTER" ]; then
     echo "-> applying import policy (restore only)"
     kubectl --context "$ctx" apply -f "$K10_IMPORT_POLICY"
@@ -167,20 +170,48 @@ for cluster in "${CLUSTERS[@]}"; do
     echo "-> triggering initial import of restore points from S3"
     kubectl --context "$ctx" create -f "$K10_IMPORT_RUN_ACTION"
 
-    # Poll for restore points to appear (up to 5 min)
-    echo "-> waiting for restore points to appear in '${APP_NAMESPACE}'"
+    # Wait for RestorePointContents to appear (up to 5 min)
+    echo "-> waiting for imported RestorePointContents"
     for i in $(seq 1 60); do
-      count=$(kubectl --context "$ctx" -n "$APP_NAMESPACE" get restorepoints \
+      RPC_COUNT=$(kubectl --context "$ctx" get restorepointcontents \
         --no-headers 2>/dev/null | wc -l)
-      if [ "$count" -gt 0 ]; then
-        echo "   found ${count} restore points"
+      if [ "$RPC_COUNT" -gt 0 ]; then
+        echo "   found ${RPC_COUNT} imported contents"
         break
       fi
       if [ "$i" -eq 60 ]; then
-        echo "   WARN: no restore points after 5 min (this is OK if you haven't run a backup yet)"
+        echo "   WARN: no RestorePointContents after 5 min"
+        echo "         (this is OK if you haven't run a backup yet)"
+        continue
       fi
       sleep 5
     done
+
+    # Link each RestorePointContent → RestorePoint in the app namespace.
+    # Kasten 9.x doesn't create namespace-scoped RestorePoints on import;
+    # we create them manually so `kubectl -n mongodb get restorepoints` works
+    # and so RestoreActions can target them.
+    echo "-> linking RestorePointContents to RestorePoints in ${APP_NAMESPACE}"
+    RPC_LIST=$(kubectl --context "$ctx" get restorepointcontents -o name 2>/dev/null || true)
+    if [ -n "$RPC_LIST" ]; then
+      echo "$RPC_LIST" | while read -r rpc; do
+        name="${rpc#restorepointcontent.apps.kio.kasten.io/}"
+        kubectl --context "$ctx" create -f - <<RPEOF 2>/dev/null || true
+apiVersion: apps.kio.kasten.io/v1alpha1
+kind: RestorePoint
+metadata:
+  name: ${name}
+  namespace: ${APP_NAMESPACE}
+spec:
+  restorePointContentRef:
+    name: ${name}
+RPEOF
+        echo "   linked: ${name}"
+      done
+      echo "   done linking"
+    else
+      echo "   no RestorePointContents to link"
+    fi
   fi
 
   echo "-> ${ctx}: done"

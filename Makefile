@@ -1,4 +1,4 @@
-# =========================================================
+﻿# =========================================================
 # k8s-s3-dr — DR lab: Kind + MongoDB + Kasten K10 + AWS S3
 # =========================================================
 # Once per session: aws sso login --profile k8s-dr-eu
@@ -125,9 +125,7 @@ seed-mongo: ## Insert EXPECTED_DOCS test documents (source cluster)
 
 ##@ Kasten
 
-# Order matters: terraform-apply → bootstrap → iam-setup → deploy-kasten.
-# Make dedupes prerequisites within a single invocation.
-deploy-kasten: terraform-apply bootstrap iam-setup ## Install K10 + profiles + policies
+deploy-kasten: terraform-apply bootstrap iam-setup ## Install K10 + profiles + policies on both clusters
 	$(SCRIPTS)/deploy-kasten.sh $(CLUSTERS)
 
 ##@ DR flow
@@ -142,27 +140,29 @@ backup: ## Trigger an immediate backup on the source cluster
 	    --sort-by=.metadata.creationTimestamp -o jsonpath="{.items[-1].metadata.name}" 2>/dev/null || true); \
 	  if [ -n "$$latest" ]; then \
 	    phase=$$(kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) get backupaction $$latest \
-	      -o jsonpath="{.status.phase}" 2>/dev/null || true); \
+	      -o jsonpath="{.status.state}" 2>/dev/null || true); \
 	    echo "  BackupAction $$latest: $$phase"; \
 	    case "$$phase" in Complete) exit 0 ;; Failed|Aborted) exit 1 ;; esac; \
 	  fi; \
 	  sleep 5; \
 	done; echo "timed out"; exit 1'
 
-import-restore-points: ## Trigger an import of restore points on the restore cluster
+import-restore-points: ## Trigger import + link RestorePointContents to RestorePoints
 	@echo "Triggering import via RunAction..."
 	@kubectl --context kind-$(lastword $(CLUSTERS)) \
 	  create -f manifests/kasten/import-run-action.yaml
-	@echo "Waiting for restore points to appear..."
+	@echo "Waiting for imported RestorePointContents..."
 	@bash -c 'for i in $$(seq 1 60); do \
-	  count=$$(kubectl --context kind-$(lastword $(CLUSTERS)) -n $(APP_NAMESPACE) get restorepoints \
+	  count=$$(kubectl --context kind-$(lastword $(CLUSTERS)) get restorepointcontents \
 	    --no-headers 2>/dev/null | wc -l); \
 	  if [ "$$count" -gt 0 ]; then \
-	    echo "  found $$count restore points"; exit 0; \
+	    echo "  found $$count imported contents"; exit 0; \
 	  fi; \
 	  echo "  waiting... ($$i/60)"; \
 	  sleep 5; \
-	done; echo "timed out waiting for restore points"; exit 1'
+	done; echo "timed out waiting for RestorePointContents"; exit 1'
+	@RESTORE_CTX=kind-$(lastword $(CLUSTERS)) APP_NAMESPACE=$(APP_NAMESPACE) \
+	  $(SCRIPTS)/link-restorepoints.sh
 
 restore: ## Trigger a Kasten restore on the restore cluster
 	@$(SCRIPTS)/restore.sh
@@ -172,7 +172,8 @@ validate-backup: ## Validate backup + restore + data integrity
 
 ##@ Orchestration
 
-e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo seed-mongo backup import-restore-points restore validate-backup ## Full end-to-end flow
+e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo seed-mongo \
+     backup import-restore-points restore validate-backup ## Full end-to-end flow
 	@echo ""
 	@echo "✅ E2E complete — backup, restore, and validation all passed."
 

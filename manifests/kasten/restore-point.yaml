@@ -1,5 +1,5 @@
 # RestoreAction for cross-cluster restore.
-apiVersion: apps.kio.kasten.io/v1alpha1
+apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RestoreAction
 metadata:
   name: restore-mongodb
