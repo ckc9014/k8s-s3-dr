@@ -151,7 +151,7 @@ deploy-kasten: terraform-apply bootstrap iam-setup ## Install Kasten K10 + S3 pr
 
 backup: ## Trigger an immediate Kasten backup on the source cluster
 	@echo "Triggering backup via RunAction..."
-	@NAME="manual-run-$$(date +%s)"; \
+	@NAME="run-$$(date +%s)"; \
 	  sed "s/REPLACE_ME/$${NAME}/" manifests/kasten/run-action.yaml \
 	    | kubectl --context kind-$(firstword $(CLUSTERS)) create -f -
 	@echo "Waiting for BackupAction to complete..."
@@ -166,7 +166,7 @@ backup: ## Trigger an immediate Kasten backup on the source cluster
 	  fi; \
 	  sleep 5; \
 	done; echo "timed out"; exit 1'
-
+	
 restore: ## Trigger a Kasten restore on the restore cluster
 	@echo "Triggering restore..."
 	@$(SCRIPTS)/restore.sh
