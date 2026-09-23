@@ -1,24 +1,16 @@
 # =========================================================
 # k8s-s3-dr — DR lab: Kind + MongoDB + Kasten K10 + AWS S3
 # =========================================================
-# Once per session(What You Must Do Before):
-# aws sso login
+# Once per session (What You Must Do Before):
+#   aws sso login --profile k8s-dr-eu
 # =========================================================
-# make help              # list all targets
-# make cluster           # create both Kind clusters
-# make bootstrap         # install CSI snapshot stack
-# make terraform-apply   # create S3 + SQS + Lambda, write .tf-output.json
-# make deploy-kasten     # install K10 + S3 profile on both clusters
-# make backup            # trigger an immediate backup
-# make restore           # restore from the latest restore point
-# make validate-backup   # run the 4 validation checks
-# make e2e               # full flow, one command
-# make clean             # delete clusters + local artifacts
-# make test-lambda       # prove the AWS pipeline without Kasten
-# =========================================================
-# Quick start:
-#   cp .env.example .env   # fill in K10_AWS_* keys
+# Quick start (fresh clone):
+#   cp .env.example .env       # leave K10_AWS_* blank — filled automatically
+#   aws sso login              # per session
 #   make e2e
+# =========================================================
+# First-time IAM setup runs automatically as part of `deploy-kasten`.
+# If you ever need to re-run it manually: make iam-setup
 # =========================================================
 
 SHELL := /usr/bin/env bash
@@ -44,9 +36,11 @@ endif
         cluster down list \
         bootstrap \
         terraform-init terraform-plan terraform-apply \
+        iam-setup vendor-crds \
         deploy-kasten \
         backup restore validate-backup \
-        e2e clean
+        e2e clean \
+        test-lambda test-lambda-fail
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -85,20 +79,53 @@ bootstrap: ## Install CSI snapshot stack + VolumeSnapshotClass on both clusters
 
 ##@ Terraform (AWS S3 + SQS + Lambda)
 
-terraform-init: ## Initialize Terraform
-	cd $(TF_DIR) && terraform init
+terraform-init: ## Initialize Terraform (safe to re-run)
+	cd $(TF_DIR) && terraform init -upgrade
 
-terraform-plan: ## Show Terraform plan
+terraform-plan: terraform-init ## Show Terraform plan
 	cd $(TF_DIR) && terraform plan
 
-terraform-apply: ## Apply Terraform and capture outputs
+terraform-apply: terraform-init ## Apply Terraform and capture outputs
 	cd $(TF_DIR) && terraform apply -auto-approve
 	cd $(TF_DIR) && terraform output -json > ../.tf-output.json
 	@echo "Outputs written to .tf-output.json"
 
+##@ Kasten setup helpers
+
+iam-setup: terraform-apply ## One-time: create Kasten IAM user, attach policy, write keys to .env
+	@if [ ! -f $(SCRIPTS)/setup-iam-user.sh ]; then \
+	  echo "ERROR: $(SCRIPTS)/setup-iam-user.sh not found."; \
+	  echo "       See README step 5, or create the script."; \
+	  exit 1; \
+	fi
+	$(SCRIPTS)/setup-iam-user.sh
+
+vendor-crds: ## Dump Kasten CRDs from source cluster into manifests/kasten/crds/
+	@mkdir -p manifests/kasten/crds
+	@echo "Dumping Kasten CRDs from kind-$(firstword $(CLUSTERS))..."
+	@kubectl --context kind-$(firstword $(CLUSTERS)) get crd -o name \
+	  | grep 'kio.kasten.io' \
+	  | while read -r crd; do \
+	      name="$${crd#customresourcedefinition.apiextensions.k8s.io/}"; \
+	      echo "  -> $${name}.yaml"; \
+	      kubectl --context kind-$(firstword $(CLUSTERS)) get "$$crd" -o json \
+	        | jq 'del( \
+	            .metadata.uid, \
+	            .metadata.resourceVersion, \
+	            .metadata.generation, \
+	            .metadata.creationTimestamp, \
+	            .metadata.managedFields, \
+	            .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"], \
+	            .status \
+	          )' > "manifests/kasten/crds/$${name}.yaml"; \
+	    done
+	@echo ""
+	@echo "Done. Commit these with:"
+	@echo "  git add manifests/kasten/crds/ && git commit -m 'feat(kasten): vendor CRDs'"
+
 ##@ Kasten
 
-deploy-kasten: terraform-apply bootstrap ## Install Kasten K10 + S3 profile
+deploy-kasten: terraform-apply bootstrap iam-setup ## Install Kasten K10 + S3 profile (auto-runs IAM setup)
 	$(SCRIPTS)/deploy-kasten.sh $(CLUSTERS)
 
 ##@ DR flow
@@ -124,12 +151,12 @@ restore: ## Trigger a Kasten restore on the restore cluster
 	@echo "Triggering restore..."
 	@$(SCRIPTS)/restore.sh
 
-validate-backup: ## Validate latest backup + restore + data (usage: make validate-backup EXPECTED_DOCS=1000)
+validate-backup: ## Validate latest backup + restore + data
 	$(SCRIPTS)/validate-backup.sh $(APP_NAMESPACE) $(EXPECTED_DOCS)
 
 ##@ Orchestration
 
-e2e: cluster terraform-apply bootstrap deploy-kasten backup restore validate-backup ## Full end-to-end flow
+e2e: cluster terraform-apply bootstrap deploy-kasten backup restore validate-backup ## Full end-to-end flow (fresh-clone safe)
 	@echo ""
 	@echo "✅ E2E complete — backup, restore, and validation all passed."
 

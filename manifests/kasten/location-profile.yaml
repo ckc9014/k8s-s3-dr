@@ -5,22 +5,26 @@ metadata:
   namespace: kasten-io
 spec:
   type: Location
-  location:
-    type: objectStore
+  locationSpec:
+    credential:
+      secretType: AwsAccessKey
+      secret:
+        apiVersion: v1
+        kind: Secret
+        name: k10-s3-creds
+        namespace: kasten-io
+    type: ObjectStore
     objectStore:
-      name: k10-s3-backups
+      name: ${BUCKET_NAME}
+      objectStoreType: S3
       region: ${AWS_REGION}
-      bucket: ${BUCKET_NAME}
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   name: k10-s3-creds
   namespace: kasten-io
-type: Opaque
+type: secrets.kanister.io/aws
 stringData:
-  k10-s3-backups: |
-    {
-      "accessKeyID": "${K10_AWS_ACCESS_KEY_ID}",
-      "secretAccessKey": "${K10_AWS_SECRET_ACCESS_KEY}"
-    }
+  aws_access_key_id: "${K10_AWS_ACCESS_KEY_ID}"
+  aws_secret_access_key: "${K10_AWS_SECRET_ACCESS_KEY}"

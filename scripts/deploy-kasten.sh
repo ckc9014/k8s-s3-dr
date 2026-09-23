@@ -3,8 +3,9 @@
 # Install Kasten K10 on both clusters and wire up the S3 Location Profile.
 #
 # Reads:
-#   .tf-output.json   (from terraform apply)
-#   .env              (AWS_REGION, K10_VERSION, K10_AWS_* keys)
+#   .tf-output.json             (from terraform apply)
+#   .env                        (AWS_REGION, K10_VERSION, K10_AWS_* keys)
+#   manifests/kasten/crds/      (vendored Kasten CRDs — optional but recommended)
 #
 # Usage:
 #   scripts/deploy-kasten.sh k8s-source k8s-restore
@@ -20,6 +21,8 @@ TF_OUTPUT="${PROJECT_ROOT}/.tf-output.json"
 K10_NAMESPACE="kasten-io"
 K10_VALUES="manifests/kasten/k10-values.yaml"
 K10_PROFILE="manifests/kasten/location-profile.yaml"
+K10_BACKUP_POLICY="manifests/kasten/backup-policy.yaml"
+K10_CRD_DIR="manifests/kasten/crds"
 
 if [ ! -f "$TF_OUTPUT" ]; then
   echo "ERROR: ${TF_OUTPUT} not found. Run 'make terraform-apply' first."
@@ -86,9 +89,26 @@ for cluster in "${CLUSTERS[@]}"; do
   helm repo add kasten https://charts.kasten.io/ >/dev/null 2>&1 || true
   helm repo update kasten >/dev/null
 
-  # 2. Helm install / upgrade ---------------------------------------------
-  # CRDs ship inside the chart and install automatically — do NOT pre-apply
-  # them with kubectl, that causes field-manager conflicts on re-runs.
+  # 2. Ensure Kasten CRDs are installed and established --------------------
+   if [ -d "$K10_CRD_DIR" ] && [ -n "$(ls -A "$K10_CRD_DIR" 2>/dev/null)" ]; then
+    echo "-> applying vendored Kasten CRDs from ${K10_CRD_DIR}"
+    kubectl --context "$ctx" apply --server-side --force-conflicts -f "$K10_CRD_DIR"
+  else
+    echo "-> no vendored CRDs found — relying on helm to install them"
+    echo "   (if this fails, run: make vendor-crds)"
+  fi
+
+  echo "-> waiting for Profile CRD to be established"
+  if ! kubectl --context "$ctx" wait --for condition=established --timeout=120s \
+         crd/profiles.config.kio.kasten.io; then
+    echo "ERROR: Profile CRD not established on ${ctx}"
+    echo "       The chart may not have installed CRDs. Try:"
+    echo "         helm uninstall k10 -n ${K10_NAMESPACE} --kube-context ${ctx}"
+    echo "         make deploy-kasten"
+    exit 1
+  fi
+
+  # 3. Helm install / upgrade ---------------------------------------------
   echo "-> installing k10 (version ${K10_VERSION:-latest})"
   if helm status k10 -n "$K10_NAMESPACE" --kube-context "$ctx" >/dev/null 2>&1; then
     echo "   k10 already installed — upgrading"
@@ -105,19 +125,21 @@ for cluster in "${CLUSTERS[@]}"; do
       -f "$K10_VALUES"
   fi
 
-  # 3. Wait for gateway ----------------------------------------------------
+  # 4. Wait for the gateway to come up -------------------------------------
   echo "-> waiting for k10 gateway"
   kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
     deploy/gateway --timeout=300s
 
-  # 4. Location Profile + S3 secret (templated with envsubst) --------------
+  # 5. Location Profile + S3 secret (templated with envsubst) --------------
   echo "-> applying Location Profile (bucket=${BUCKET_NAME}, region=${AWS_REGION})"
   envsubst < "$K10_PROFILE" | kubectl --context "$ctx" apply -f -
 
-  # 5. Backup Policy — source cluster only
+  # 6. Backup Policy — source cluster only ---------------------------------
+  # Only the source cluster needs a backup policy. The restore cluster just
+  # needs the profile so it can discover restore points from S3.
   if [ "$cluster" = "${CLUSTERS[0]}" ]; then
     echo "-> applying backup policy (source cluster only)"
-    kubectl --context "$ctx" apply -f manifests/kasten/backup-policy.yaml
+    kubectl --context "$ctx" apply -f "$K10_BACKUP_POLICY"
   fi
 
   echo "-> ${ctx}: done"
@@ -127,3 +149,4 @@ echo ""
 echo "Kasten deployed. Check with:"
 echo "  kubectl --context kind-${CLUSTERS[0]} -n kasten-io get pods"
 echo "  kubectl --context kind-${CLUSTERS[0]} -n kasten-io get profiles"
+echo "  kubectl --context kind-${CLUSTERS[0]} -n kasten-io get policies"
