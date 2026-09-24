@@ -1,22 +1,19 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 #
 # Install Kasten K10 on both clusters and wire up S3 (backup + import).
 #
 # SOURCE cluster  (CLUSTERS[0]):
 #   - K10 install
 #   - Location Profile
-#   - Backup Policy  (backup + export to S3)
+#   - Backup Policy  (backup + export to S3, generates migration token)
 #
 # RESTORE cluster (CLUSTERS[1]):
 #   - K10 install
 #   - Location Profile
-#   - Import Policy + triggered initial import
+#   - Import Policy (with migration token from source)
+#   - Triggered initial import
 #   - Link imported RestorePointContents → RestorePoints in the app namespace
 #   - Bare app namespace with Kasten discovery label
-#
-# Reads:
-#   .tf-output.json   (bucket name + region)
-#   .env              (K10_AWS_* keys)
 #
 set -euo pipefail
 
@@ -73,9 +70,12 @@ echo "  region:  ${AWS_REGION}"
 echo "  source:  ${SOURCE_CLUSTER}"
 echo "  restore: ${RESTORE_CLUSTER:-<none>}"
 
-# ---- pre-flight: verify contexts, create namespaces on ALL clusters -------
+# ===========================================================================
+# Pre-flight: verify contexts, create namespaces
+# ===========================================================================
 echo ""
 echo "==> Pre-flight: verifying contexts + creating namespaces"
+
 for cluster in "${CLUSTERS[@]}"; do
   ctx="kind-${cluster}"
   if ! kubectl config get-contexts "$ctx" >/dev/null 2>&1; then
@@ -88,7 +88,7 @@ for cluster in "${CLUSTERS[@]}"; do
     --dry-run=client -o yaml | kubectl --context "$ctx" apply -f -
 done
 
-# Restore cluster needs the app namespace + Kasten discovery label.
+# Restore cluster needs the app namespace + Kasten discovery label
 if [ -n "$RESTORE_CLUSTER" ]; then
   ctx="kind-${RESTORE_CLUSTER}"
   echo "-> ${ctx}: ensuring app namespace ${APP_NAMESPACE} with Kasten label"
@@ -98,7 +98,61 @@ if [ -n "$RESTORE_CLUSTER" ]; then
     k10.kasten.io/backup=true --overwrite
 fi
 
-# ---- per-cluster install --------------------------------------------------
+# ===========================================================================
+# Helper: wait for a Kasten APIService to become Available
+# ===========================================================================
+wait_for_apiservice() {
+  local ctx="$1"
+  local name="$2"
+  local attempts="${3:-60}"
+
+  echo "-> waiting for APIService ${name} to become Available"
+  for i in $(seq 1 "$attempts"); do
+    state=$(kubectl --context "$ctx" get apiservice "$name" \
+      -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}' \
+      2>/dev/null || true)
+    if echo "$state" | grep -q 'Available=True'; then
+      echo "   APIService available after ${i} attempt(s)"
+      return 0
+    fi
+    if [ "$i" -eq "$attempts" ]; then
+      echo "ERROR: APIService ${name} not Available on ${ctx}"
+      kubectl --context "$ctx" get apiservices | grep kasten
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+# ===========================================================================
+# Helper: wait for a Kasten CRD to exist and be established
+# ===========================================================================
+wait_for_crd() {
+  local ctx="$1"
+  local crd_name="$2"
+  local attempts="${3:-60}"
+
+  echo "-> waiting for CRD ${crd_name} to be registered"
+  for i in $(seq 1 "$attempts"); do
+    if kubectl --context "$ctx" get crd "$crd_name" >/dev/null 2>&1; then
+      echo "   CRD registered after ${i} attempt(s)"
+      break
+    fi
+    if [ "$i" -eq "$attempts" ]; then
+      echo "ERROR: CRD ${crd_name} not found on ${ctx}"
+      return 1
+    fi
+    sleep 5
+  done
+
+  echo "-> waiting for CRD ${crd_name} to be established"
+  kubectl --context "$ctx" wait --for=condition=established --timeout=120s \
+    "crd/${crd_name}"
+}
+
+# ===========================================================================
+# Per-cluster Kasten install
+# ===========================================================================
 for cluster in "${CLUSTERS[@]}"; do
   ctx="kind-${cluster}"
   echo ""
@@ -110,7 +164,7 @@ for cluster in "${CLUSTERS[@]}"; do
   helm repo update kasten >/dev/null
 
   # 2. Helm install / upgrade ---------------------------------------------
-  # IMPORTANT: helm installs the Kasten CRDs. We must NOT wait for CRDs
+  # CRITICAL ORDER: helm install creates the CRDs. Do NOT wait for CRDs
   # before this step — they don't exist until helm runs.
   echo "-> installing k10 (version ${K10_VERSION:-latest})"
   if helm status k10 -n "$K10_NAMESPACE" --kube-context "$ctx" >/dev/null 2>&1; then
@@ -129,39 +183,116 @@ for cluster in "${CLUSTERS[@]}"; do
       -f "$K10_VALUES"
   fi
 
-  # 3. Wait for the Profile CRD to be established -------------------------
-  # Now that helm has installed them, wait for the CRD to register with the
-  # API server before trying to create any Kasten custom resources.
-  echo "-> waiting for Profile CRD to be established"
-  if ! kubectl --context "$ctx" wait --for=condition=established --timeout=180s \
-         crd/profiles.config.kio.kasten.io; then
-    echo "ERROR: Profile CRD not established on ${ctx} after helm install."
-    echo "       Check helm release: helm status k10 -n ${K10_NAMESPACE} --kube-context ${ctx}"
-    exit 1
-  fi
+  # 3. Wait for CRDs and APIServices --------------------------------------
+  wait_for_crd "$ctx" "profiles.config.kio.kasten.io"
+  wait_for_crd "$ctx" "policies.config.kio.kasten.io"
+  wait_for_crd "$ctx" "restorepoints.apps.kio.kasten.io"
+  wait_for_apiservice "$ctx" "v1alpha1.actions.kio.kasten.io"
 
-  # 4. Wait for gateway ----------------------------------------------------
-  echo "-> waiting for k10 gateway"
+  # 4. Wait for Kasten controllers to be Ready ----------------------------
+  # These are the services the profile/policy/import code paths depend on.
+  echo "-> waiting for gateway"
   kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
     deploy/gateway --timeout=300s
+
+  echo "-> waiting for aggregatedapis-svc"
+  kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
+    deploy/aggregatedapis-svc --timeout=300s
+
+  echo "-> waiting for catalog-svc"
+  kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
+    deploy/catalog-svc --timeout=300s
+
+  echo "-> waiting for controllermanager-svc"
+  kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
+    deploy/controllermanager-svc --timeout=300s
 
   # 5. Location Profile ----------------------------------------------------
   echo "-> applying Location Profile (bucket=${BUCKET_NAME}, region=${AWS_REGION})"
   envsubst < "$K10_PROFILE" | kubectl --context "$ctx" apply -f -
 
+  # Wait for the profile to actually become Success
+  echo "-> waiting for profile to validate"
+  for i in $(seq 1 30); do
+    status=$(kubectl --context "$ctx" -n "$K10_NAMESPACE" get profile s3-backup-profile \
+      -o jsonpath='{.status.validation}' 2>/dev/null || true)
+    if [ "$status" = "Success" ]; then
+      echo "   profile Success after ${i} attempt(s)"
+      break
+    fi
+    if [ "$i" -eq 30 ]; then
+      echo "   WARN: profile is '${status}' after 30 attempts"
+      kubectl --context "$ctx" -n "$K10_NAMESPACE" get profile s3-backup-profile
+    fi
+    sleep 5
+  done
+
   # 6. SOURCE cluster: Backup Policy ---------------------------------------
   if [ "$cluster" = "$SOURCE_CLUSTER" ]; then
     echo "-> applying backup policy (source only)"
     kubectl --context "$ctx" apply -f "$K10_BACKUP_POLICY"
+
+    # The backup policy's export action creates a migration token in its
+    # spec once the policy reconciles. Give it time, but don't block on it —
+    # the token also requires a successful export to be generated.
+    echo "-> noting: migration token is created after the first successful export"
   fi
 
   # 7. RESTORE cluster: Import Policy + import + link restore points -------
   if [ -n "$RESTORE_CLUSTER" ] && [ "$cluster" = "$RESTORE_CLUSTER" ]; then
-    echo "-> applying import policy (restore only)"
+    echo "-> applying import policy (restore only) — placeholder, token added next"
     kubectl --context "$ctx" apply -f "$K10_IMPORT_POLICY"
 
-    echo "-> triggering initial import of restore points from S3"
-    kubectl --context "$ctx" create -f "$K10_IMPORT_RUN_ACTION"
+    # Fetch the migration token from the SOURCE policy.
+    # NOTE: In Kasten 9.x, the token lives in .spec.actions[].exportParameters.receiveString,
+    # NOT in .status.receiveString.
+    SOURCE_CTX="kind-${SOURCE_CLUSTER}"
+    echo "-> fetching migration token from ${SOURCE_CTX}"
+    SOURCE_TOKEN=""
+    for i in $(seq 1 24); do
+      SOURCE_TOKEN=$(kubectl --context "$SOURCE_CTX" -n "$K10_NAMESPACE" \
+        get policy mongodb-backup \
+        -o jsonpath='{.spec.actions[?(@.action=="export")].exportParameters.receiveString}' \
+        2>/dev/null || true)
+      if [ -n "$SOURCE_TOKEN" ]; then
+        echo "   token available after ${i} attempt(s) (length ${#SOURCE_TOKEN})"
+        break
+      fi
+      echo "   waiting for token... (${i}/24)"
+      sleep 5
+    done
+
+    if [ -z "$SOURCE_TOKEN" ]; then
+      echo "   WARN: source policy has no token yet."
+      echo "         Run 'make backup' on the source cluster to generate it,"
+      echo "         then re-apply the import policy:"
+      echo "           SOURCE_TOKEN=\$(kubectl --context ${SOURCE_CTX} -n ${K10_NAMESPACE} get policy mongodb-backup -o jsonpath='{.spec.actions[?(@.action==\"export\")].exportParameters.receiveString}')"
+      echo "           kubectl --context ${ctx} -n ${K10_NAMESPACE} patch policy mongodb-import --type merge -p \"{\\\"spec\\\":{\\\"actions\\\":[{\\\"action\\\":\\\"import\\\",\\\"importParameters\\\":{\\\"profile\\\":{\\\"name\\\":\\\"s3-backup-profile\\\",\\\"namespace\\\":\\\"kasten-io\\\"},\\\"receiveString\\\":\\\"\${SOURCE_TOKEN}\\\"}}]}}\""
+    else
+      echo "-> patching import policy with fresh token"
+      kubectl --context "$ctx" -n "$K10_NAMESPACE" patch policy mongodb-import \
+        --type merge \
+        -p "{\"spec\":{\"actions\":[{\"action\":\"import\",\"importParameters\":{\"profile\":{\"name\":\"s3-backup-profile\",\"namespace\":\"kasten-io\"},\"receiveString\":\"${SOURCE_TOKEN}\"}}]}}" \
+        >/dev/null
+
+      # Wait for the import policy to validate
+      echo "-> waiting for import policy to validate"
+      for i in $(seq 1 24); do
+        status=$(kubectl --context "$ctx" -n "$K10_NAMESPACE" get policy mongodb-import \
+          -o jsonpath='{.status.validation}' 2>/dev/null || true)
+        if [ "$status" = "Success" ]; then
+          echo "   import policy Success after ${i} attempt(s)"
+          break
+        fi
+        if [ "$i" -eq 24 ]; then
+          echo "   WARN: import policy is '${status}' after 24 attempts"
+        fi
+        sleep 5
+      done
+
+      echo "-> triggering initial import of restore points from S3"
+      kubectl --context "$ctx" create -f "$K10_IMPORT_RUN_ACTION"
+    fi
 
     # Wait for RestorePointContents to appear (up to 5 min)
     echo "-> waiting for imported RestorePointContents"
@@ -173,8 +304,9 @@ for cluster in "${CLUSTERS[@]}"; do
         break
       fi
       if [ "$i" -eq 60 ]; then
-        echo "   WARN: no RestorePointContents after 5 min (OK if no backup exists yet)"
-        continue
+        echo "   WARN: no RestorePointContents after 5 min"
+        echo "         (this is OK if you haven't run a backup yet)"
+        break
       fi
       sleep 5
     done
@@ -200,18 +332,23 @@ RPEOF
       done
       echo "   done linking"
     else
-      echo "   no RestorePointContents to link"
+      echo "   no RestorePointContents to link yet"
     fi
   fi
 
   echo "-> ${ctx}: done"
 done
 
+# ===========================================================================
+# Summary
+# ===========================================================================
 echo ""
 echo "Kasten deployed."
 echo "Verify:"
 echo "  kubectl --context kind-${SOURCE_CLUSTER}  -n ${K10_NAMESPACE} get policies"
+echo "  kubectl --context kind-${SOURCE_CLUSTER}  -n ${K10_NAMESPACE} get profile s3-backup-profile"
 if [ -n "$RESTORE_CLUSTER" ]; then
   echo "  kubectl --context kind-${RESTORE_CLUSTER} -n ${K10_NAMESPACE} get policies"
+  echo "  kubectl --context kind-${RESTORE_CLUSTER} -n ${K10_NAMESPACE} get profile s3-backup-profile"
   echo "  kubectl --context kind-${RESTORE_CLUSTER} -n ${APP_NAMESPACE} get restorepoints"
 fi

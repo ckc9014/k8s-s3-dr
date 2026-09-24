@@ -125,7 +125,7 @@ seed-mongo: ## Insert EXPECTED_DOCS test documents (source cluster)
 
 ##@ Kasten
 
-deploy-kasten: terraform-apply bootstrap iam-setup
+deploy-kasten: terraform-apply bootstrap iam-setup ## Install K10 + profiles + policies
 	$(SCRIPTS)/deploy-kasten.sh $(CLUSTERS)
 
 ##@ DR flow
@@ -147,7 +147,18 @@ backup: ## Trigger an immediate backup on the source cluster
 	  sleep 5; \
 	done; echo "timed out"; exit 1'
 
-import-restore-points: ## Trigger import + link RestorePointContents to RestorePoints
+# Order within this target matters:
+#   1. refresh the restore's import policy with the source token
+#   2. trigger the import
+#   3. wait for RestorePointContents
+#   4. link RPCs into namespace-scoped RestorePoints
+import-restore-points: ## Refresh token + trigger import + link RestorePoints
+	@echo "Refreshing migration token on import policy..."
+	@SOURCE_CTX=kind-$(firstword $(CLUSTERS)) \
+	 RESTORE_CTX=kind-$(lastword $(CLUSTERS)) \
+	 K10_NAMESPACE=kasten-io \
+	 $(SCRIPTS)/refresh-import-token.sh
+	@echo ""
 	@echo "Triggering import via RunAction..."
 	@kubectl --context kind-$(lastword $(CLUSTERS)) \
 	  create -f manifests/kasten/import-run-action.yaml
@@ -172,6 +183,12 @@ validate-backup: ## Validate backup + restore + data integrity
 
 ##@ Orchestration
 
+# Order matters:
+#   backup                  → generates the migration token on the source policy
+#   import-restore-points   → refreshes the restore's import policy with that
+#                             token, triggers import, links RPCs
+#   restore                 → restores MongoDB from the latest RestorePoint
+#   validate-backup         → asserts backup + restore + document count
 e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo seed-mongo \
      backup import-restore-points restore validate-backup
 	@echo ""

@@ -11,4 +11,4 @@ spec:
         profile:
           name: s3-backup-profile
           namespace: kasten-io
-        receiveString: "bIzAPpoanmFfkA59gk5FhsN5G1BNIViEjQOG2XJhS5V4O9AfmGixSK7FfImNiug0JBD0zKuNGU+u7zELhTr92SsclgpEDrnTYrKrqty007ywkLpavmB1bUOIzqfRFOtzXZARsB1j9d96lbOQ7Nyfm3enIIjhwkdEtU6ZM0OOmsiE6LpPIk3Un1PVvGveGyI74f5yXJGton1Y00o3MTiL9929XXSzHSjrpihH94zbaJdioYyeZS3AdosMu6SFyo31LZSOZq2OK9RnBXn8sVN+sjGVsaXHOLCciFfbVT8uCSkxWXLNvmYmx2C0otr27NlohhRiG4kKzTQal94i2GTcE7EeueRAOBxQs5NyxZX8v/K61UfDjJXW5Hx4jVT5hXtu/5z4a5oGlLGgGDtvzJmgN0SmnrMdFuvTpRity4lLJTsR36BfIMWEQT5nERCV38/yNAGQ//k8YrulRl9H7RR5RXvxz5Ziqa96bWzwKDlD4MMQogIFwELGOBhFKG1DPJzii/HEb1qJmyRuv9tDjE3mzGEPueE3W/qNay90ZuzvnTh9p9UeZoflDVDCVXGual6tobdWDwfuug"
+        receiveString: "PLACEHOLDER"    # patched by deploy-kasten.sh
