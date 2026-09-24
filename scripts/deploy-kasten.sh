@@ -184,12 +184,15 @@ for cluster in "${CLUSTERS[@]}"; do
   fi
 
   # 3. Wait for CRDs and APIServices --------------------------------------
+  # CRDs (served directly by kube-apiserver):
   wait_for_crd "$ctx" "profiles.config.kio.kasten.io"
   wait_for_crd "$ctx" "policies.config.kio.kasten.io"
-  wait_for_crd "$ctx" "restorepoints.apps.kio.kasten.io"
-  wait_for_apiservice "$ctx" "v1alpha1.actions.kio.kasten.io"
 
-  # 4. Wait for Kasten controllers to be Ready ----------------------------
+  # APIServices (served by Kasten's aggregatedapis-svc pod):
+  wait_for_apiservice "$ctx" "v1alpha1.actions.kio.kasten.io"
+  wait_for_apiservice "$ctx" "v1alpha1.apps.kio.kasten.io"
+
+    # 4. Wait for Kasten controllers to be Ready ----------------------------
   # These are the services the profile/policy/import code paths depend on.
   echo "-> waiting for gateway"
   kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
@@ -201,7 +204,11 @@ for cluster in "${CLUSTERS[@]}"; do
 
   echo "-> waiting for catalog-svc"
   kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
-    deploy/catalog-svc --timeout=300s
+    deploy/catalog-svc --timeout=600s || {
+      echo "   rollout slow — checking pod directly"
+      kubectl --context "$ctx" -n "$K10_NAMESPACE" wait \
+        --for=condition=Ready pod -l app=catalog-svc --timeout=300s
+  }
 
   echo "-> waiting for controllermanager-svc"
   kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
