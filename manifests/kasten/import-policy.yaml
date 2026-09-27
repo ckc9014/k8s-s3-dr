@@ -1,7 +1,7 @@
 apiVersion: config.kio.kasten.io/v1alpha1
 kind: Policy
 metadata:
-  name: mongodb-import
+  name: import-labeled           
   namespace: kasten-io
 spec:
   frequency: "@onDemand"
@@ -11,4 +11,4 @@ spec:
         profile:
           name: s3-backup-profile
           namespace: kasten-io
-        receiveString: "PLACEHOLDER"    # patched by deploy-kasten.sh
+        receiveString: "PLACEHOLDER"  

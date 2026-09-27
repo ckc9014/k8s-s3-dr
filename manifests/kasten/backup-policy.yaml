@@ -1,34 +1,28 @@
-# Kasten Policy — backs up everything labeled k10.kasten.io/backup=true
 apiVersion: config.kio.kasten.io/v1alpha1
 kind: Policy
 metadata:
-  name: mongodb-backup
+  name: backup-labeled      
   namespace: kasten-io
 spec:
-
   frequency: "@daily"
-
   retention:
     daily: 7
     weekly: 4
-
   selector:
     matchLabels:
-      k10.kasten.io/backup: "true"
-
+      k10.kasten.io/backup: "true" 
   actions:
     - action: backup
       backupParameters:
         profile:
           name: s3-backup-profile
           namespace: kasten-io
-
     - action: export
       exportParameters:
+        exportData:
+          enabled: true
         profile:
           name: s3-backup-profile
           namespace: kasten-io
-        exportData:
-          enabled: true
 
-        frequency: "@daily"
+       

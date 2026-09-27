@@ -1,12 +1,12 @@
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RunAction
 metadata:
-  generateName: run-mongodb-import-
+  generateName: run-import-
   namespace: kasten-io
 spec:
   subject:
     apiVersion: config.kio.kasten.io/v1alpha1
     kind: Policy
-    name: mongodb-import
+    name: import-labeled           
     namespace: kasten-io
   expiresAt: "2027-09-24T00:00:00Z"
