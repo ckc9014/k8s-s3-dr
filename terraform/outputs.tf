@@ -32,3 +32,11 @@ output "lambda_function_name" {
   description = "Name of the validation Lambda."
   value       = aws_lambda_function.validator.function_name
 }
+
+output "sqs_dlq_url" {
+  value = aws_sqs_queue.backup_events_dlq.url
+}
+
+output "sqs_dlq_arn" {
+  value = aws_sqs_queue.backup_events_dlq.arn
+}
