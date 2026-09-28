@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
-#
-# Copy the migration token from the source backup policy into the
-# restore cluster's import policy, then wait for it to validate.
-#
 set -euo pipefail
 
 SOURCE_CTX="${SOURCE_CTX:-kind-k8s-source}"
 RESTORE_CTX="${RESTORE_CTX:-kind-k8s-restore}"
 K10_NAMESPACE="kasten-io"
-SOURCE_POLICY="${SOURCE_POLICY:-mongodb-backup}"
-IMPORT_POLICY="${IMPORT_POLICY:-mongodb-import}"
+SOURCE_POLICY="${SOURCE_POLICY:-backup-labeled}"   
+IMPORT_POLICY="${IMPORT_POLICY:-import-labeled}"    
 
-echo "-> waiting for migration token on ${SOURCE_CTX}/${SOURCE_POLICY}"
+echo "-> reading token from ${SOURCE_CTX}/${SOURCE_POLICY}"
 SOURCE_TOKEN=""
 for i in $(seq 1 60); do
   SOURCE_TOKEN=$(kubectl --context "$SOURCE_CTX" -n "$K10_NAMESPACE" \
@@ -27,8 +23,8 @@ for i in $(seq 1 60); do
 done
 
 if [ -z "$SOURCE_TOKEN" ]; then
-  echo "ERROR: source policy still has no migration token after 5 min."
-  echo "       Check: kubectl --context ${SOURCE_CTX} -n ${K10_NAMESPACE} get policy ${SOURCE_POLICY} -o yaml | tail -40"
+  echo "ERROR: source policy ${SOURCE_POLICY} has no migration token after 5 min."
+  echo "       Has 'make backup' completed successfully?"
   exit 1
 fi
 

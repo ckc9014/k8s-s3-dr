@@ -2,7 +2,15 @@
 # k8s-s3-dr — DR lab: Kind + MongoDB + Kasten K10 + AWS S3
 # =========================================================
 # Once per session: aws sso login --profile k8s-dr-eu
-# Fresh clone:      cp .env.example .env && make e2e
+#
+# Flow (read top to bottom):
+#   1. Infrastructure  → clusters + AWS + CSI + Kasten
+#   2. Source side     → MongoDB + backup → S3
+#   3. Restore side    → import ← S3 + restore + validate
+#
+# Commands:
+#   make e2e    → infra + source workload (ready to test)
+#   make dr     → run the DR cycle (seed → backup → import → restore → validate)
 # =========================================================
 
 SHELL := /usr/bin/env bash
@@ -28,16 +36,20 @@ endif
         iam-setup vendor-crds \
         deploy-mongo seed-mongo \
         deploy-kasten \
-        backup import-restore-points restore validate-backup \
-        e2e clean \
-        test-lambda test-lambda-fail
+        backup \
+        import-restore-points restore validate-backup \
+        e2e dr clean \
+        test-lambda test-lambda-fail \
+		reset-dr
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
 	/^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 } \
 	/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 
-##@ Cluster
+# ===========================================================================
+##@ 1. Infrastructure
+# ===========================================================================
 
 cluster: ## Create both Kind clusters
 	@for c in $(CLUSTERS); do \
@@ -62,12 +74,8 @@ down: ## Delete both Kind clusters
 list: ## List Kind clusters
 	@kind get clusters
 
-##@ Bootstrap
-
-bootstrap: ## Install CSI snapshot stack + StorageClass + VolumeSnapshotClass
+bootstrap: ## Install CSI snapshot stack on both clusters
 	$(SCRIPTS)/bootstrap-clusters.sh $(CLUSTERS)
-
-##@ Terraform (AWS S3 + SQS + Lambda)
 
 terraform-init: ## Initialize Terraform
 	cd $(TF_DIR) && terraform init -upgrade
@@ -75,12 +83,10 @@ terraform-init: ## Initialize Terraform
 terraform-plan: terraform-init ## Show Terraform plan
 	cd $(TF_DIR) && terraform plan
 
-terraform-apply: terraform-init ## Apply Terraform, write .tf-output.json
+terraform-apply: terraform-init ## Create AWS S3 + SQS + Lambda; write .tf-output.json
 	cd $(TF_DIR) && terraform apply -auto-approve
 	cd $(TF_DIR) && terraform output -json > ../.tf-output.json
 	@echo "Outputs written to .tf-output.json"
-
-##@ Kasten setup helpers
 
 iam-setup: terraform-apply ## One-time: create Kasten IAM user, write keys to .env
 	@if [ ! -f $(SCRIPTS)/setup-iam-user.sh ]; then \
@@ -90,7 +96,10 @@ iam-setup: terraform-apply ## One-time: create Kasten IAM user, write keys to .e
 	fi
 	$(SCRIPTS)/setup-iam-user.sh
 
-vendor-crds: ## Dump Kasten CRDs from source cluster into manifests/kasten/crds/
+deploy-kasten: terraform-apply bootstrap iam-setup ## Install K10 on both clusters + profiles + policies
+	$(SCRIPTS)/deploy-kasten.sh $(CLUSTERS)
+
+vendor-crds: ## Dump Kasten CRDs from live cluster to manifests/kasten/crds/
 	@mkdir -p manifests/kasten/crds
 	@echo "Dumping CRDs from kind-$(firstword $(CLUSTERS))..."
 	@kubectl --context kind-$(firstword $(CLUSTERS)) get crd -o name \
@@ -106,36 +115,34 @@ vendor-crds: ## Dump Kasten CRDs from source cluster into manifests/kasten/crds/
 	@echo "Now commit:"
 	@echo "  git add manifests/kasten/crds/ && git commit -m 'feat(kasten): vendor CRDs'"
 
-##@ Workload
+# ===========================================================================
+##@ 2. Source side (backup → S3)
+# ===========================================================================
 
-deploy-mongo: ## Apply MongoDB manifests to SOURCE cluster only
-	@echo "Applying MongoDB to kind-$(firstword $(CLUSTERS))..."
+deploy-mongo: ## Deploy MongoDB to SOURCE cluster
+	@echo "[SOURCE] Applying MongoDB to kind-$(firstword $(CLUSTERS))..."
 	kubectl --context kind-$(firstword $(CLUSTERS)) apply -f manifests/mongodb/
-	@echo "Waiting for mongodb-0 to be Ready..."
 	kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) \
 	  wait --for=condition=Ready pod/mongodb-0 --timeout=180s
-	@echo "✅ MongoDB ready on kind-$(firstword $(CLUSTERS))"
+	@echo "[SOURCE] ✅ MongoDB ready"
 
-seed-mongo: ## Insert EXPECTED_DOCS test documents (source cluster)
-	@echo "Seeding $(EXPECTED_DOCS) documents into testdb.users..."
+seed-mongo: ## Drop + re-seed EXPECTED_DOCS test docs (idempotent)
+	@echo "[TEST] Seeding $(EXPECTED_DOCS) docs into testdb.users..."
 	@kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) exec mongodb-0 -- \
 	  mongosh --quiet -u root -p labpassword --authenticationDatabase admin \
-	  --eval "db.getSiblingDB('testdb').users.insertMany(Array.from({length: $(EXPECTED_DOCS)}, (_, i) => ({ _id: i, name: 'user' + i })))"
-	@echo "✅ Seeded $(EXPECTED_DOCS) documents"
+	  --eval "db.getSiblingDB('testdb').users.drop(); \
+	          db.getSiblingDB('testdb').users.insertMany( \
+	            Array.from({length: $(EXPECTED_DOCS)}, (_, i) => ({ _id: i, name: 'user' + i })) \
+	          ); \
+	          print('inserted ' + db.getSiblingDB('testdb').users.countDocuments() + ' docs');"
+	@echo "[TEST] ✅ Seeded $(EXPECTED_DOCS) docs (collection dropped first)"
 
-##@ Kasten
-
-deploy-kasten: terraform-apply bootstrap iam-setup ## Install K10 + profiles + policies
-	$(SCRIPTS)/deploy-kasten.sh $(CLUSTERS)
-
-##@ DR flow
-
-backup: ## Trigger an immediate backup on the source cluster
-	@echo "Triggering backup via RunAction..."
+backup: ## Source → snapshot + export to S3
+	@echo "[SOURCE] Triggering backup via RunAction..."
 	@kubectl --context kind-$(firstword $(CLUSTERS)) \
 	  create -f manifests/kasten/run-action.yaml
-	@echo "Waiting for BackupAction to complete..."
-	@bash -c 'for i in $$(seq 1 120); do \
+	@echo "[SOURCE] Waiting for BackupAction + Export to S3..."
+	@bash -c 'for i in $$(seq 1 180); do \
 	  latest=$$(kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) get backupactions \
 	    --sort-by=.metadata.creationTimestamp -o jsonpath="{.items[-1].metadata.name}" 2>/dev/null || true); \
 	  if [ -n "$$latest" ]; then \
@@ -147,22 +154,21 @@ backup: ## Trigger an immediate backup on the source cluster
 	  sleep 5; \
 	done; echo "timed out"; exit 1'
 
-# Order within this target matters:
-#   1. refresh the restore's import policy with the source token
-#   2. trigger the import
-#   3. wait for RestorePointContents
-#   4. link RPCs into namespace-scoped RestorePoints
-import-restore-points: ## Refresh token + trigger import + link RestorePoints
-	@echo "Refreshing migration token on import policy..."
+# ===========================================================================
+##@ 3. Restore side (S3 → restore → validate)
+# ===========================================================================
+
+import-restore-points: ## S3 → import restore points into restore cluster
+	@echo "[RESTORE] Refreshing migration token on import policy..."
 	@SOURCE_CTX=kind-$(firstword $(CLUSTERS)) \
 	 RESTORE_CTX=kind-$(lastword $(CLUSTERS)) \
 	 K10_NAMESPACE=kasten-io \
 	 $(SCRIPTS)/refresh-import-token.sh
 	@echo ""
-	@echo "Triggering import via RunAction..."
+	@echo "[RESTORE] Triggering import via RunAction..."
 	@kubectl --context kind-$(lastword $(CLUSTERS)) \
 	  create -f manifests/kasten/import-run-action.yaml
-	@echo "Waiting for imported RestorePointContents..."
+	@echo "[RESTORE] Waiting for imported RestorePointContents..."
 	@bash -c 'for i in $$(seq 1 60); do \
 	  count=$$(kubectl --context kind-$(lastword $(CLUSTERS)) get restorepointcontents \
 	    --no-headers 2>/dev/null | wc -l); \
@@ -172,27 +178,45 @@ import-restore-points: ## Refresh token + trigger import + link RestorePoints
 	  echo "  waiting... ($$i/60)"; \
 	  sleep 5; \
 	done; echo "timed out waiting for RestorePointContents"; exit 1'
+	@echo "[RESTORE] Linking RestorePointContents → RestorePoints"
 	@RESTORE_CTX=kind-$(lastword $(CLUSTERS)) APP_NAMESPACE=$(APP_NAMESPACE) \
 	  $(SCRIPTS)/link-restorepoints.sh
 
-restore: ## Trigger a Kasten restore on the restore cluster
+restore: ## Restore MongoDB into RESTORE cluster from latest restore point
+	@echo "[RESTORE] Triggering RestoreAction..."
 	@$(SCRIPTS)/restore.sh
 
-validate-backup: ## Validate backup + restore + data integrity
+validate-backup: ## Assert restored data matches EXPECTED_DOCS
+	@echo "[VALIDATE] Checking backup status + restored doc count..."
 	$(SCRIPTS)/validate-backup.sh $(APP_NAMESPACE) $(EXPECTED_DOCS)
 
+# ===========================================================================
 ##@ Orchestration
+# ===========================================================================
 
-# Order matters:
-#   backup                  → generates the migration token on the source policy
-#   import-restore-points   → refreshes the restore's import policy with that
-#                             token, triggers import, links RPCs
-#   restore                 → restores MongoDB from the latest RestorePoint
-#   validate-backup         → asserts backup + restore + document count
-e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo seed-mongo \
-     backup import-restore-points restore validate-backup
+# Phase 1 — stand up infrastructure + source workload (MongoDB running, no data).
+# Does NOT seed, backup, or restore. Just makes the environment ready.
+e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo
 	@echo ""
-	@echo "✅ E2E complete — backup, restore, and validation all passed."
+	@echo "✅ Infrastructure + source workload ready."
+	@echo ""
+	@echo "Next:"
+	@echo "  make dr              → full DR cycle (seed → backup → import → restore → validate)"
+	@echo "  make seed-mongo      → just refresh test data"
+	@echo "  make backup          → source only: snapshot + export to S3"
+
+# Phase 2 — full DR cycle. Self-contained, re-runnable.
+# Flow:
+#   [TEST]     seed fresh 1000 docs (drop + insert)
+#   [SOURCE]   snapshot + export to S3
+#   [RESTORE]  import from S3 → restore → validate
+dr: seed-mongo backup import-restore-points restore validate-backup
+	@echo ""
+	@echo "✅ DR cycle complete."
+	@echo ""
+	@echo "   [TEST]    fresh $(EXPECTED_DOCS) docs seeded"
+	@echo "   [SOURCE]  snapshot + export to S3"
+	@echo "   [RESTORE] import + restore + validate"
 
 ##@ Cleanup
 
@@ -200,6 +224,38 @@ clean: down ## Delete clusters + local artifacts
 	rm -rf $(TF_DIR)/.build
 	rm -f .tf-output.json
 	@echo "Local artifacts removed. (S3 bucket must be deleted manually.)"
+
+##@ DR reset
+
+reset-dr: ## Wipe DR state (Kasten CRs + S3 for current cluster) — keeps infra
+	@echo "[RESET] Removing Kasten DR CRs on both clusters..."
+	@kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) \
+	  delete backupactions,exportactions,restoreactions --all --ignore-not-found 2>/dev/null || true
+	@kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) \
+	  delete restorepoints --all --ignore-not-found 2>/dev/null || true
+	@kubectl --context kind-$(firstword $(CLUSTERS)) -n kasten-io \
+	  delete runactions,importactions,exportactions --all --ignore-not-found 2>/dev/null || true
+	@kubectl --context kind-$(lastword $(CLUSTERS)) \
+	  delete restorepointcontents --all --ignore-not-found 2>/dev/null || true
+	@kubectl --context kind-$(lastword $(CLUSTERS)) -n $(APP_NAMESPACE) \
+	  delete restorepoints,restoreactions --all --ignore-not-found 2>/dev/null || true
+	@kubectl --context kind-$(lastword $(CLUSTERS)) -n kasten-io \
+	  delete runactions,importactions --all --ignore-not-found 2>/dev/null || true
+	@echo "[RESET] Deleting any restored MongoDB on restore cluster..."
+	@kubectl --context kind-$(lastword $(CLUSTERS)) -n $(APP_NAMESPACE) \
+	  delete statefulset mongodb --ignore-not-found 2>/dev/null || true
+	@kubectl --context kind-$(lastword $(CLUSTERS)) -n $(APP_NAMESPACE) \
+	  delete pvc data-mongodb-0 --ignore-not-found 2>/dev/null || true
+	@echo "[RESET] Wiping S3 data for current cluster..."
+	@BUCKET=$$(jq -r '.bucket_name.value' .tf-output.json); \
+	  for id in $$(aws s3 ls "s3://$$BUCKET/k10/" --profile $${AWS_PROFILE:-default} --region $${AWS_REGION:-eu-west-1} | awk '{print $$2}' | tr -d '/'); do \
+	    echo "  removing k10/$$id/"; \
+	    aws s3 rm "s3://$$BUCKET/k10/$$id/" --recursive \
+	      --profile $${AWS_PROFILE:-default} --region $${AWS_REGION:-eu-west-1} >/dev/null; \
+	  done
+	@echo ""
+	@echo "✅ DR state reset (infra + Kasten install untouched)."
+	@echo "   Next: make dr"
 
 ##@ AWS helpers
 

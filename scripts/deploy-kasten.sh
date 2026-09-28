@@ -30,6 +30,7 @@ K10_PROFILE="manifests/kasten/location-profile.yaml"
 K10_BACKUP_POLICY="manifests/kasten/backup-policy.yaml"
 K10_IMPORT_POLICY="manifests/kasten/import-policy.yaml"
 K10_IMPORT_RUN_ACTION="manifests/kasten/import-run-action.yaml"
+K10_S3_SECRET="manifests/kasten/s3-secret.yaml"  
 
 if [ ! -f "$TF_OUTPUT" ]; then
   echo "ERROR: ${TF_OUTPUT} not found. Run 'make terraform-apply' first."
@@ -215,20 +216,56 @@ for cluster in "${CLUSTERS[@]}"; do
     deploy/controllermanager-svc --timeout=300s
 
   # 5. Location Profile ----------------------------------------------------
+   # 5. S3 Secret + Location Profile ----------------------------------------
+  # Order matters: create the secret FIRST, give Kasten's informer cache a
+  # moment to see it, THEN create the Profile. Otherwise the Profile
+  # validation races against the secret's appearance and caches a
+  # "secret not found" failure.
+  echo "-> applying S3 credentials secret"
+  envsubst < "$K10_S3_SECRET" | kubectl --context "$ctx" apply -f -
+
+  echo "-> waiting for secret to appear in-cluster"
+  for i in $(seq 1 12); do
+    if kubectl --context "$ctx" -n "$K10_NAMESPACE" get secret k10-s3-creds >/dev/null 2>&1; then
+      echo "   secret visible after ${i} attempt(s)"
+      break
+    fi
+    sleep 5
+  done
+  # Small extra delay for Kasten's informer cache to sync
+  sleep 5
+
   echo "-> applying Location Profile (bucket=${BUCKET_NAME}, region=${AWS_REGION})"
   envsubst < "$K10_PROFILE" | kubectl --context "$ctx" apply -f -
 
-  # Wait for the profile to actually become Success
+  # Wait for the profile to become Success. If it fails with the SAME hash
+  # twice in a row, restart the controller to clear its cached validation.
   echo "-> waiting for profile to validate"
+  last_hash=""
   for i in $(seq 1 30); do
     status=$(kubectl --context "$ctx" -n "$K10_NAMESPACE" get profile s3-backup-profile \
       -o jsonpath='{.status.validation}' 2>/dev/null || true)
+    hash=$(kubectl --context "$ctx" -n "$K10_NAMESPACE" get profile s3-backup-profile \
+      -o jsonpath='{.status.hash}' 2>/dev/null || true)
+
     if [ "$status" = "Success" ]; then
       echo "   profile Success after ${i} attempt(s)"
       break
     fi
+
+    # Detect a cached failure: same hash, still Failed
+    if [ "$status" = "Failed" ] && [ "$hash" = "$last_hash" ]; then
+      echo "   profile failing with same hash (${hash}) — restarting controller"
+      kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout restart deploy/controllermanager-svc
+      kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status deploy/controllermanager-svc --timeout=180s
+      sleep 30
+      last_hash=""
+      continue
+    fi
+    last_hash="$hash"
+
     if [ "$i" -eq 30 ]; then
-      echo "   WARN: profile is '${status}' after 30 attempts"
+      echo "   WARN: profile is '${status}' (hash=${hash}) after 30 attempts"
       kubectl --context "$ctx" -n "$K10_NAMESPACE" get profile s3-backup-profile
     fi
     sleep 5
