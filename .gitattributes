@@ -1,14 +1,35 @@
+# Default: normalize to LF in the repo and on checkout.
 * text=auto eol=lf
-*.sh     text eol=lf
-Makefile text eol=lf
-*.tf     text eol=lf
-*.yaml   text eol=lf
-*.yml    text eol=lf
-*.md     text eol=lf
-*.json   text eol=lf
 
-# Binary — don't touch
-*.png binary
-*.jpg binary
-*.tar binary
-*.tgz binary
+# Shell scripts and Makefiles must be LF or they break on Linux.
+*.sh         text eol=lf
+Makefile     text eol=lf
+
+# Infrastructure / config
+*.tf         text eol=lf
+*.tfvars     text eol=lf
+*.hcl        text eol=lf
+*.yaml       text eol=lf
+*.yml        text eol=lf
+*.json       text eol=lf
+*.conf       text eol=lf
+*.ini        text eol=lf
+
+# Docs
+*.md         text eol=lf
+
+# Env files (never committed, but keep them normalized locally)
+.env         text eol=lf
+.env.*       text eol=lf
+
+# Git metadata
+.gitignore   text eol=lf
+.gitattributes text eol=lf
+
+# Binaries — don't touch
+*.png        binary
+*.jpg        binary
+*.tar        binary
+*.tgz        binary
+*.zip        binary
+*.gz         binary
