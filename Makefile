@@ -56,9 +56,28 @@ help: ## Show this help
 ##@ 0. Terraform backend (one-time)
 # ===========================================================================
 
-bootstrap-backend: ## Create the S3 bucket for Terraform remote state
-	cd $(TF_BOOTSTRAP) && terraform init -upgrade
-	cd $(TF_BOOTSTRAP) && terraform apply -auto-approve
+bootstrap-backend: ## Create the S3 bucket for Terraform remote state (idempotent)
+	@cd $(TF_BOOTSTRAP) && terraform init -upgrade
+	@cd $(TF_BOOTSTRAP) && \
+	  BUCKET=$$(terraform output -raw state_bucket_name 2>/dev/null); \
+	  if [ -z "$$BUCKET" ]; then \
+	    ACCOUNT=$$(aws sts get-caller-identity --query Account --output text --profile $${AWS_PROFILE:-default} 2>/dev/null); \
+	    if [ -z "$$ACCOUNT" ]; then \
+	      echo "ERROR: could not determine AWS account"; \
+	      echo "       Run: aws sso login --profile $${AWS_PROFILE:-default}"; \
+	      exit 1; \
+	    fi; \
+	    BUCKET="$${TF_STATE_BUCKET_PREFIX:-k8s-dr-eu-tfstate}-$$ACCOUNT"; \
+	  fi; \
+	  echo "-> state bucket: $$BUCKET"; \
+	  if aws s3api head-bucket --bucket "$$BUCKET" --profile $${AWS_PROFILE:-default} 2>/dev/null; then \
+	    echo "   bucket exists — importing into state"; \
+	    terraform import aws_s3_bucket.tf_state "$$BUCKET" 2>/dev/null || true; \
+	    terraform import aws_s3_bucket_versioning.tf_state "$$BUCKET" 2>/dev/null || true; \
+	    terraform import aws_s3_bucket_server_side_encryption_configuration.tf_state "$$BUCKET" 2>/dev/null || true; \
+	    terraform import aws_s3_bucket_public_access_block.tf_state "$$BUCKET" 2>/dev/null || true; \
+	  fi
+	@cd $(TF_BOOTSTRAP) && terraform apply -auto-approve
 	@echo ""
 	@echo "✅ State bucket ready: $$(cd $(TF_BOOTSTRAP) && terraform output -raw state_bucket_name)"
 	@echo "   Now run: make e2e"
