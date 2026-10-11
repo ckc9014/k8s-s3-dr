@@ -4,13 +4,16 @@
 # Once per session: aws sso login --profile k8s-dr-eu
 #
 # Flow (read top to bottom):
+#   0. Backend         → S3 bucket for Terraform remote state (once)
 #   1. Infrastructure  → clusters + AWS + CSI + Kasten
 #   2. Source side     → MongoDB + backup → S3
 #   3. Restore side    → import ← S3 + restore + validate
 #
 # Commands:
-#   make e2e    → infra + source workload (ready to test)
-#   make dr     → run the DR cycle (seed → backup → import → restore → validate)
+#   make bootstrap-backend → create the TF state bucket (once)
+#   make e2e               → infra + source workload (ready to test)
+#   make dr                → run the DR cycle
+#   make teardown          → destroy everything (clusters + AWS + state bucket)
 # =========================================================
 
 SHELL := /usr/bin/env bash
@@ -20,6 +23,7 @@ CONFIG_PATH      ?= manifests/kind-cluster-config.yaml
 APP_NAMESPACE    ?= mongodb
 EXPECTED_DOCS    ?= 1000
 TF_DIR            = terraform
+TF_BOOTSTRAP      = $(TF_DIR)/bootstrap
 SCRIPTS           = scripts
 
 ifneq (,$(wildcard ./.env))
@@ -32,7 +36,8 @@ endif
 .PHONY: help \
         cluster down list \
         bootstrap \
-        terraform-init terraform-plan terraform-apply \
+        bootstrap-backend terraform-init terraform-plan terraform-apply \
+        destroy destroy-backend teardown \
         iam-setup vendor-crds \
         deploy-mongo seed-mongo \
         deploy-kasten \
@@ -40,12 +45,23 @@ endif
         import-restore-points restore validate-backup \
         e2e dr clean \
         test-lambda test-lambda-fail dlq \
-		reset-dr
+        reset-dr
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
 	/^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 } \
 	/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
+
+# ===========================================================================
+##@ 0. Terraform backend (one-time)
+# ===========================================================================
+
+bootstrap-backend: ## Create the S3 bucket for Terraform remote state
+	cd $(TF_BOOTSTRAP) && terraform init -upgrade
+	cd $(TF_BOOTSTRAP) && terraform apply -auto-approve
+	@echo ""
+	@echo "✅ State bucket ready: $$(cd $(TF_BOOTSTRAP) && terraform output -raw state_bucket_name)"
+	@echo "   Now run: make e2e"
 
 # ===========================================================================
 ##@ 1. Infrastructure
@@ -77,8 +93,16 @@ list: ## List Kind clusters
 bootstrap: ## Install CSI snapshot stack on both clusters
 	$(SCRIPTS)/bootstrap-clusters.sh $(CLUSTERS)
 
-terraform-init: ## Initialize Terraform
-	cd $(TF_DIR) && terraform init -upgrade
+terraform-init: bootstrap-backend ## Initialize Terraform with the remote backend
+	@STATE_BUCKET=$$(cd $(TF_BOOTSTRAP) && terraform output -raw state_bucket_name 2>/dev/null); \
+	 STATE_REGION=$$(cd $(TF_BOOTSTRAP) && terraform output -raw state_bucket_region 2>/dev/null); \
+	 if [ -z "$$STATE_BUCKET" ]; then \
+	   echo "ERROR: state bucket not found — run 'make bootstrap-backend' first"; \
+	   exit 1; \
+	 fi; \
+	 cd $(TF_DIR) && terraform init -upgrade \
+	   -backend-config="bucket=$$STATE_BUCKET" \
+	   -backend-config="region=$$STATE_REGION"
 
 terraform-plan: terraform-init ## Show Terraform plan
 	cd $(TF_DIR) && terraform plan
@@ -87,6 +111,22 @@ terraform-apply: terraform-init ## Create AWS S3 + SQS + Lambda; write .tf-outpu
 	cd $(TF_DIR) && terraform apply -auto-approve
 	cd $(TF_DIR) && terraform output -json > ../.tf-output.json
 	@echo "Outputs written to .tf-output.json"
+
+destroy: ## Destroy all AWS resources (S3, SQS, Lambda, IAM, alarms)
+	cd $(TF_DIR) && terraform destroy -auto-approve
+	@echo ""
+	@echo "✅ AWS resources destroyed."
+	@echo "   Backup bucket + state bucket are force-deleted by Terraform."
+
+destroy-backend: ## Destroy the Terraform state bucket (run AFTER 'make destroy')
+	@read -p "This deletes the state bucket. Type 'yes' to confirm: " ans; \
+	 [ "$$ans" = "yes" ] || { echo "aborted"; exit 1; }
+	cd $(TF_BOOTSTRAP) && terraform destroy -auto-approve
+	@echo "✅ State bucket destroyed."
+
+teardown: down destroy destroy-backend ## Full teardown: clusters + AWS + state bucket
+	@echo ""
+	@echo "✅ Full teardown complete."
 
 iam-setup: terraform-apply ## One-time: create Kasten IAM user, write keys to .env
 	@if [ ! -f $(SCRIPTS)/setup-iam-user.sh ]; then \
@@ -219,10 +259,6 @@ e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo
 	@echo "  make backup          → source only: snapshot + export to S3"
 
 # Phase 2 — full DR cycle. Self-contained, re-runnable.
-# Flow:
-#   [TEST]     seed fresh 1000 docs (drop + insert)
-#   [SOURCE]   snapshot + export to S3
-#   [RESTORE]  import from S3 → restore → validate
 dr: seed-mongo backup import-restore-points restore validate-backup
 	@echo ""
 	@echo "✅ DR cycle complete."
@@ -233,10 +269,12 @@ dr: seed-mongo backup import-restore-points restore validate-backup
 
 ##@ Cleanup
 
-clean: down ## Delete clusters + local artifacts
+clean: down ## Delete Kind clusters + local artifacts (keeps AWS resources)
 	rm -rf $(TF_DIR)/.build
 	rm -f .tf-output.json
-	@echo "Local artifacts removed. (S3 bucket must be deleted manually.)"
+	@echo ""
+	@echo "✅ Local artifacts removed."
+	@echo "   AWS resources still exist — run 'make destroy' to remove them."
 
 ##@ DR reset
 
