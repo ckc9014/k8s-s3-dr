@@ -10,11 +10,10 @@
 # RESTORE cluster (CLUSTERS[1]):
 #   - K10 install
 #   - Location Profile
-#   - Import Policy (with migration token from source)
-#   - Triggered initial import
-#   - Link imported RestorePointContents → RestorePoints in the app namespace
-#   - Bare app namespace with Kasten discovery label
+#   - Import Policy (token patched in here if source token is available)
 #
+# Note: import triggering + linking restore points is handled by
+# 'make import-restore-points' during the DR cycle, not by this script.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -186,8 +185,8 @@ for cluster in "${CLUSTERS[@]}"; do
 
   # 3. Wait for CRDs and APIServices --------------------------------------
   # CRDs (served directly by kube-apiserver):
-  wait_for_crd "$ctx" "profiles.config.kio.kasten.io"
-  wait_for_crd "$ctx" "policies.config.kio.kasten.io"
+  wait_for_crd "$ctx" "profiles.config.kio.kasten.io" 180
+  wait_for_crd "$ctx" "policies.config.kio.kasten.io" 180
 
   # APIServices (served by Kasten's aggregatedapis-svc pod):
   wait_for_apiservice "$ctx" "v1alpha1.actions.kio.kasten.io"
@@ -295,7 +294,7 @@ for cluster in "${CLUSTERS[@]}"; do
     SOURCE_TOKEN=""
     for i in $(seq 1 24); do
       SOURCE_TOKEN=$(kubectl --context "$SOURCE_CTX" -n "$K10_NAMESPACE" \
-        get policy mongodb-backup \
+        get policy backup-labeled \
         -o jsonpath='{.spec.actions[?(@.action=="export")].exportParameters.receiveString}' \
         2>/dev/null || true)
       if [ -n "$SOURCE_TOKEN" ]; then
@@ -310,11 +309,11 @@ for cluster in "${CLUSTERS[@]}"; do
       echo "   WARN: source policy has no token yet."
       echo "         Run 'make backup' on the source cluster to generate it,"
       echo "         then re-apply the import policy:"
-      echo "           SOURCE_TOKEN=\$(kubectl --context ${SOURCE_CTX} -n ${K10_NAMESPACE} get policy mongodb-backup -o jsonpath='{.spec.actions[?(@.action==\"export\")].exportParameters.receiveString}')"
-      echo "           kubectl --context ${ctx} -n ${K10_NAMESPACE} patch policy mongodb-import --type merge -p \"{\\\"spec\\\":{\\\"actions\\\":[{\\\"action\\\":\\\"import\\\",\\\"importParameters\\\":{\\\"profile\\\":{\\\"name\\\":\\\"s3-backup-profile\\\",\\\"namespace\\\":\\\"kasten-io\\\"},\\\"receiveString\\\":\\\"\${SOURCE_TOKEN}\\\"}}]}}\""
+      echo "           SOURCE_TOKEN=\$(kubectl --context ${SOURCE_CTX} -n ${K10_NAMESPACE} get policy backup-labeled -o jsonpath='{.spec.actions[?(@.action==\"export\")].exportParameters.receiveString}')"
+      echo "           kubectl --context ${ctx} -n ${K10_NAMESPACE} patch policy import-labeled --type merge -p \"{\\\"spec\\\":{\\\"actions\\\":[{\\\"action\\\":\\\"import\\\",\\\"importParameters\\\":{\\\"profile\\\":{\\\"name\\\":\\\"s3-backup-profile\\\",\\\"namespace\\\":\\\"kasten-io\\\"},\\\"receiveString\\\":\\\"\${SOURCE_TOKEN}\\\"}}]}}\""
     else
       echo "-> patching import policy with fresh token"
-      kubectl --context "$ctx" -n "$K10_NAMESPACE" patch policy mongodb-import \
+      kubectl --context "$ctx" -n "$K10_NAMESPACE" patch policy import-labeled \
         --type merge \
         -p "{\"spec\":{\"actions\":[{\"action\":\"import\",\"importParameters\":{\"profile\":{\"name\":\"s3-backup-profile\",\"namespace\":\"kasten-io\"},\"receiveString\":\"${SOURCE_TOKEN}\"}}]}}" \
         >/dev/null
@@ -322,7 +321,7 @@ for cluster in "${CLUSTERS[@]}"; do
       # Wait for the import policy to validate
       echo "-> waiting for import policy to validate"
       for i in $(seq 1 24); do
-        status=$(kubectl --context "$ctx" -n "$K10_NAMESPACE" get policy mongodb-import \
+        status=$(kubectl --context "$ctx" -n "$K10_NAMESPACE" get policy import-labeled \
           -o jsonpath='{.status.validation}' 2>/dev/null || true)
         if [ "$status" = "Success" ]; then
           echo "   import policy Success after ${i} attempt(s)"
@@ -334,55 +333,11 @@ for cluster in "${CLUSTERS[@]}"; do
         sleep 5
       done
 
-      echo "-> triggering initial import of restore points from S3"
-      kubectl --context "$ctx" create -f "$K10_IMPORT_RUN_ACTION"
-    fi
-
-    # Wait for RestorePointContents to appear (up to 5 min)
-    echo "-> waiting for imported RestorePointContents"
-    for i in $(seq 1 60); do
-      RPC_COUNT=$(kubectl --context "$ctx" get restorepointcontents \
-        --no-headers 2>/dev/null | wc -l)
-      if [ "$RPC_COUNT" -gt 0 ]; then
-        echo "   found ${RPC_COUNT} imported contents"
-        break
-      fi
-      if [ "$i" -eq 60 ]; then
-        echo "   WARN: no RestorePointContents after 5 min"
-        echo "         (this is OK if you haven't run a backup yet)"
-        break
-      fi
-      sleep 5
-    done
-
-    # Link each RestorePointContent → RestorePoint in the app namespace.
-    # Kasten 9.x doesn't create namespace-scoped RestorePoints on import.
-    echo "-> linking RestorePointContents to RestorePoints in ${APP_NAMESPACE}"
-    RPC_LIST=$(kubectl --context "$ctx" get restorepointcontents -o name 2>/dev/null || true)
-    if [ -n "$RPC_LIST" ]; then
-      echo "$RPC_LIST" | while read -r rpc; do
-        name="${rpc#restorepointcontent.apps.kio.kasten.io/}"
-        kubectl --context "$ctx" create -f - <<RPEOF 2>/dev/null || true
-apiVersion: apps.kio.kasten.io/v1alpha1
-kind: RestorePoint
-metadata:
-  name: ${name}
-  namespace: ${APP_NAMESPACE}
-spec:
-  restorePointContentRef:
-    name: ${name}
-RPEOF
-        echo "   linked: ${name}"
-      done
-      echo "   done linking"
-    else
-      echo "   no RestorePointContents to link yet"
+      # echo "-> triggering initial import of restore points from S3"
+      # kubectl --context "$ctx" create -f "$K10_IMPORT_RUN_ACTION"
     fi
   fi
-
-  echo "-> ${ctx}: done"
 done
-
 # ===========================================================================
 # Summary
 # ===========================================================================

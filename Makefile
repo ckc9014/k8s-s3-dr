@@ -39,7 +39,7 @@ endif
         backup \
         import-restore-points restore validate-backup \
         e2e dr clean \
-        test-lambda test-lambda-fail \
+        test-lambda test-lambda-fail dlq \
 		reset-dr
 
 help: ## Show this help
@@ -273,3 +273,10 @@ test-lambda-fail: ## Upload a tiny object to test the failure path
 	  s3://$$(jq -r '.bucket_name.value' .tf-output.json)/k10/test/tiny-$$(date +%s).tar.gz \
 	  --profile $${AWS_PROFILE:-default} --region $${AWS_REGION:-eu-west-1}
 	@echo "Uploaded (2 bytes) — expect FAIL in Lambda logs."
+
+dlq: ## Show DLQ depth (run after test-lambda-fail + ~90s)
+	@aws sqs get-queue-attributes \
+	  --queue-url "$$(jq -r '.sqs_dlq_url.value' .tf-output.json)" \
+	  --attribute-names ApproximateNumberOfMessages \
+	  --profile $${AWS_PROFILE:-default} --region $${AWS_REGION:-eu-west-1} \
+	  | jq -r '"DLQ: " + .Attributes.ApproximateNumberOfMessages + " message(s)"'
