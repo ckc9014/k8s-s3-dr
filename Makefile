@@ -165,19 +165,32 @@ import-restore-points: ## S3 → import restore points into restore cluster
 	 K10_NAMESPACE=kasten-io \
 	 $(SCRIPTS)/refresh-import-token.sh
 	@echo ""
-	@echo "[RESTORE] Triggering import via RunAction..."
-	@kubectl --context kind-$(lastword $(CLUSTERS)) \
-	  create -f manifests/kasten/import-run-action.yaml
-	@echo "[RESTORE] Waiting for imported RestorePointContents..."
-	@bash -c 'for i in $$(seq 1 60); do \
-	  count=$$(kubectl --context kind-$(lastword $(CLUSTERS)) get restorepointcontents \
-	    --no-headers 2>/dev/null | wc -l); \
-	  if [ "$$count" -gt 0 ]; then \
-	    echo "  found $$count imported contents"; exit 0; \
-	  fi; \
-	  echo "  waiting... ($$i/60)"; \
-	  sleep 5; \
-	done; echo "timed out waiting for RestorePointContents"; exit 1'
+	@bash -c 'RESTORE_CTX=kind-$(lastword $(CLUSTERS)); \
+	  before=$$(kubectl --context "$$RESTORE_CTX" get restorepointcontents \
+	    --sort-by=.metadata.creationTimestamp \
+	    -o jsonpath="{.items[-1].metadata.creationTimestamp}" 2>/dev/null || echo ""); \
+	  echo "[RESTORE] Latest RestorePointContent before import: $$before"; \
+	  echo ""; \
+	  echo "[RESTORE] Triggering import via RunAction..."; \
+	  kubectl --context "$$RESTORE_CTX" \
+	    create -f manifests/kasten/import-run-action.yaml; \
+	  echo "[RESTORE] Waiting for ImportAction to complete..."; \
+	  for i in $$(seq 1 60); do \
+	    state=$$(kubectl --context "$$RESTORE_CTX" -n kasten-io \
+	      get importactions --sort-by=.metadata.creationTimestamp \
+	      -o jsonpath="{.items[-1].status.state}" 2>/dev/null || true); \
+	    if [ "$$state" = "Complete" ]; then \
+	      echo "  ✅ ImportAction Complete"; exit 0; \
+	    fi; \
+	    if [ "$$state" = "Failed" ]; then \
+	      echo "  ❌ ImportAction Failed — check:"; \
+	      echo "     kubectl --context $$RESTORE_CTX -n kasten-io get importactions -o wide"; \
+	      exit 1; \
+	    fi; \
+	    echo "  waiting... ($$i/60) [state: $$state]"; \
+	    sleep 5; \
+	  done; \
+	  echo "❌ timed out waiting for ImportAction"; exit 1'
 	@echo "[RESTORE] Linking RestorePointContents → RestorePoints"
 	@RESTORE_CTX=kind-$(lastword $(CLUSTERS)) APP_NAMESPACE=$(APP_NAMESPACE) \
 	  $(SCRIPTS)/link-restorepoints.sh
