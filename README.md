@@ -95,7 +95,7 @@ A separate S3 bucket holds Terraform's remote state (bootstrapped once via `make
 
 ![Terraform outputs and queue state](docs/images/09-terraform-outputs.jpg)
 
-*`make queues` and `make dlq` showing the AWS pipeline health after a successful DR cycle.*
+*`make dlq` showing the AWS pipeline health after a successful DR cycle.*
 
 ## Choose your workflow
 
@@ -440,7 +440,6 @@ The Lambda does **not** open the backup or verify content — it's a size-only s
 
 ```bash
 make help              # list all targets
-make queues            # show message counts (main queue + DLQ)
 make dlq               # show DLQ depth only
 make list              # list Kind clusters
 make down              # delete both Kind clusters (keeps AWS)
