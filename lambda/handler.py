@@ -3,19 +3,42 @@ S3-event backup validator.
 
 Triggered by SQS messages originating from S3 ObjectCreated events.
 
-Check the size of backup.
+Checks the size of backup data objects. Kasten's own metadata files
+(kopia.*, xn0_*, _log_*) are legitimately small and are skipped —
+they are not backups, just Kopia repository bookkeeping.
 """
 import json
 import os
 import boto3
 
 s3 = boto3.client("s3")
-MIN_SIZE = int(os.environ.get("MIN_SIZE_BYTES", "1024"))
+MIN_SIZE = int(os.environ.get("MIN_SIZE_BYTES", "64"))
+
+# Kasten/Kopia metadata filenames that are legitimately tiny.
+METADATA_NAMES = {
+    "kopia.blobcfg",
+    "kopia.repository",
+    "kopia.maintenance",
+}
+
+# Filename prefixes that mark metadata (not real backup data).
+METADATA_PREFIXES = ("xn0_", "_log_")
+
+
+def is_metadata(key: str) -> bool:
+    """Return True if the S3 key is Kasten/Kopia metadata, not data."""
+    name = key.rsplit("/", 1)[-1]
+    if name in METADATA_NAMES:
+        return True
+    if name.startswith(METADATA_PREFIXES):
+        return True
+    return False
 
 
 def handler(event, context):
     failures = 0
     checked = 0
+    skipped = 0
 
     for record in event.get("Records", []):
         try:
@@ -40,6 +63,11 @@ def handler(event, context):
                 failures += 1
                 continue
 
+            if is_metadata(key):
+                print(f"SKIP (metadata): {bucket}/{key}")
+                skipped += 1
+                continue
+
             try:
                 head = s3.head_object(Bucket=bucket, Key=key)
                 size = head["ContentLength"]
@@ -55,7 +83,7 @@ def handler(event, context):
             else:
                 print(f"OK: {bucket}/{key} ({size} bytes)")
 
-    print(f"Validated {checked} object(s), {failures} failure(s)")
+    print(f"Validated {checked} object(s), skipped {skipped} metadata, {failures} failure(s)")
 
     if failures:
         raise RuntimeError(f"{failures} backup validation failure(s)")

@@ -31,5 +31,5 @@ variable "backup_expiry_days" {
 variable "min_backup_size_bytes" {
   description = "Minimum size (bytes) a backup object must have to pass validation."
   type        = number
-  default     = 1024
+  default     = 64
 }
