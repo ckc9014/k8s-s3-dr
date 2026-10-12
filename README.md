@@ -55,45 +55,45 @@ A separate S3 bucket holds Terraform's remote state (bootstrapped once via `make
 
 ### Source cluster — backup policy and RestorePoint
 
-![Backup policy](docs/images/01-source-kasten-policy.png)
+![Backup policy](docs/images/01-source-kasten-policy.jpg)
 
 *`backup-labeled` policy with snapshot + export enabled, pointing at `s3-backup-profile`.*
 
-![Source RestorePoint](docs/images/02-restorepoint-source.png)
+![Source RestorePoint](docs/images/02-restorepoint-source.jpg)
 
 *A completed backup appears as a RestorePoint. The export to S3 makes it visible to the restore cluster.*
 
 ### AWS pipeline — S3, SQS, CloudWatch
 
-![S3 bucket layout](docs/images/03-s3-bucket-layout.png)
+![S3 bucket layout](docs/images/03-s3-bucket-layout.jpg)
 
 *S3 bucket showing `k10/<cluster-id>/migration/backup-labeled/` — the Kopia repository structure Kasten writes.*
 
-![CloudWatch alarm OK](docs/images/04-cloudwatch-alarm-ok.png)
+![CloudWatch alarm OK](docs/images/04-cloudwatch-alarm-ok.jpg)
 
 *Both alarms in OK state — nothing failing, DLQ empty.*
 
-![CloudWatch alarm firing](docs/images/05-cloudwatch-alarm-firing.png)
+![CloudWatch alarm firing](docs/images/05-cloudwatch-alarm-firing.jpg)
 
 *`k8s-dr-dlq-not-empty` fires ~90s after a bad object triggers 3 Lambda failures.*
 
 ### Restore cluster — import and restore
 
-![Restore cluster imported](docs/images/06-restore-cluster-imported.png)
+![Restore cluster imported](docs/images/06-restore-cluster-imported.jpg)
 
 *The imported `mongodb` app — the RestorePoint is now visible on the restore cluster.*
 
-![Restore phases complete](docs/images/07-restore-phases-complete.png)
+![Restore phases complete](docs/images/07-restore-phases-complete.jpg)
 
 *RestoreAction phases running. "All phases completed successfully" confirms the data was injected.*
 
 ### Verification
 
-![MongoDB document count](docs/images/08-mongodb-doc-count.png)
+![MongoDB document count](docs/images/08-mongodb-doc-count.jpg)
 
 *The restored MongoDB has exactly 1000 documents — ground-truth proof the DR worked.*
 
-![Terraform outputs and queue state](docs/images/09-terraform-outputs.png)
+![Terraform outputs and queue state](docs/images/09-terraform-outputs.jpg)
 
 *`make queues` and `make dlq` showing the AWS pipeline health after a successful DR cycle.*
 
@@ -116,9 +116,9 @@ Runs on any OS that can run Docker + Kind. **WSL is not required.**
 | Environment | Status | Notes |
 |---|---|---|
 | **Native Linux** | ✅ Recommended | Simplest — no virtualization layer |
-| **WSL2 on Windows** | ✅ Supported | Works well, has DNS quirks |
-| **macOS** | ✅ Supported | Docker Desktop or Colima |
-| **Windows (native)** | ⚠️ Not recommended | Kind + bash + make are awkward on native Windows |
+| **WSL2 on Windows** | ✅ Supported |
+| **macOS** | ✅ Supported | 
+| **Windows (native)** | ⚠️ Not recommended | 
 
 If you're on Windows, use **WSL2**. On macOS or Linux, use your native shell.
 
@@ -528,8 +528,9 @@ k8s-s3-dr/
         ├── backup-policy.yaml        # Source cluster backup policy
         ├── import-policy.yaml        # Restore cluster import policy
         ├── run-action.yaml           # Trigger backup policy
-        ├── import-run-action.yaml    # Trigger import policy
-        └── crds/                     # Vendored Kasten CRDs (optional)
+        ├── restore-point.yaml        # restore-point of the policy
+        ├── namespace.yaml
+        └── import-run-action.yaml    # Trigger import policy
 ```
 
 ## How validation works
