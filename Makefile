@@ -40,10 +40,10 @@ endif
         destroy destroy-backend teardown \
         iam-setup vendor-crds \
         deploy-mongo seed-mongo \
-        deploy-kasten \
+        deploy-kasten deploy-policies \
         backup \
         import-restore-points restore validate-backup \
-        e2e dr clean \
+        _infra infra e2e dr clean \
         test-lambda test-lambda-fail dlq \
         reset-dr
 
@@ -155,8 +155,11 @@ iam-setup: terraform-apply ## One-time: create Kasten IAM user, write keys to .e
 	fi
 	$(SCRIPTS)/setup-iam-user.sh
 
-deploy-kasten: terraform-apply bootstrap iam-setup ## Install K10 on both clusters + profiles + policies
+deploy-kasten: terraform-apply bootstrap iam-setup ## Install K10 + S3 profile (no policies)
 	$(SCRIPTS)/deploy-kasten.sh $(CLUSTERS)
+
+deploy-policies: ## Apply backup + import policies (source + restore)
+	$(SCRIPTS)/deploy-policies.sh $(CLUSTERS)
 
 vendor-crds: ## Dump Kasten CRDs from live cluster to manifests/kasten/crds/
 	@mkdir -p manifests/kasten/crds
@@ -200,7 +203,7 @@ backup: ## Source → snapshot + export to S3
 	@echo "[SOURCE] Triggering backup via RunAction..."
 	@kubectl --context kind-$(firstword $(CLUSTERS)) \
 	  create -f manifests/kasten/run-action.yaml
-	@echo "[SOURCE] Waiting for BackupAction + Export to S3..."
+	@echo "[SOURCE] Waiting for BackupAction to complete..."
 	@bash -c 'for i in $$(seq 1 180); do \
 	  latest=$$(kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) get backupactions \
 	    --sort-by=.metadata.creationTimestamp -o jsonpath="{.items[-1].metadata.name}" 2>/dev/null || true); \
@@ -212,6 +215,15 @@ backup: ## Source → snapshot + export to S3
 	  fi; \
 	  sleep 5; \
 	done; echo "timed out"; exit 1'
+	@echo "[SOURCE] Waiting for ExportAction to complete..."
+	@bash -c 'for i in $$(seq 1 120); do \
+	  state=$$(kubectl --context kind-$(firstword $(CLUSTERS)) -n $(APP_NAMESPACE) \
+	    get exportactions --sort-by=.metadata.creationTimestamp \
+	    -o jsonpath="{.items[-1].status.state}" 2>/dev/null || true); \
+	  echo "  ExportAction: $$state"; \
+	  case "$$state" in Complete) exit 0 ;; Failed|Aborted) exit 1 ;; esac; \
+	  sleep 5; \
+	done; echo "timed out waiting for ExportAction"; exit 1'
 
 # ===========================================================================
 ##@ 3. Restore side (S3 → restore → validate)
@@ -266,16 +278,19 @@ validate-backup: ## Assert restored data matches EXPECTED_DOCS
 ##@ Orchestration
 # ===========================================================================
 
-# Phase 1 — stand up infrastructure + source workload (MongoDB running, no data).
-# Does NOT seed, backup, or restore. Just makes the environment ready.
-e2e: cluster terraform-apply bootstrap deploy-kasten deploy-mongo
+_infra: cluster terraform-apply bootstrap deploy-kasten deploy-mongo
 	@echo ""
-	@echo "✅ Infrastructure + source workload ready."
+	@echo "→ Infra provisioned (clusters, AWS, CSI, Kasten, MongoDB)."
+
+infra: _infra ## Infra only — no policies (for UI-driven DR)
 	@echo ""
-	@echo "Next:"
-	@echo "  make dr              → full DR cycle (seed → backup → import → restore → validate)"
-	@echo "  make seed-mongo      → just refresh test data"
-	@echo "  make backup          → source only: snapshot + export to S3"
+	@echo "✅ Infrastructure ready."
+	@echo "   Next: create policies in the Kasten UI (see WORKFLOW.md)."
+
+e2e: _infra deploy-policies ## Full env — infra + DR policies
+	@echo ""
+	@echo "✅ Full environment ready."
+	@echo "   Next: make dr"
 
 # Phase 2 — full DR cycle. Self-contained, re-runnable.
 dr: seed-mongo backup import-restore-points restore validate-backup
