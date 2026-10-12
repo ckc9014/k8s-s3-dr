@@ -1,15 +1,16 @@
+gitignore
 # =========================================================
 # Terraform
 # =========================================================
-terraform/.terraform/
-terraform/*.tfstate
-terraform/*.tfstate.*
-terraform/*.tfvars
-terraform/*.tfvars.json
-terraform/crash.log
-terraform/crash.*.log
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
 terraform/.build/
-
+terraform/bootstrap/.build/
 # Terraform outputs consumed by deploy-kasten.sh
 .tf-output.json
 
