@@ -80,7 +80,7 @@ bootstrap-backend: ## Create the S3 bucket for Terraform remote state (idempoten
 	@cd $(TF_BOOTSTRAP) && terraform apply -auto-approve
 	@echo ""
 	@echo "✅ State bucket ready: $$(cd $(TF_BOOTSTRAP) && terraform output -raw state_bucket_name)"
-	@echo "   Now run: make e2e"
+	@echo "   Now run: make e2e or make infra"
 
 # ===========================================================================
 ##@ 1. Infrastructure

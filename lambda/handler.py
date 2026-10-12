@@ -3,9 +3,10 @@ S3-event backup validator.
 
 Triggered by SQS messages originating from S3 ObjectCreated events.
 
-Checks the size of backup data objects. Kasten's own metadata files
-(kopia.*, xn0_*, _log_*) are legitimately small and are skipped —
-they are not backups, just Kopia repository bookkeeping.
+Checks the size of backup data objects. Two classes of messages are
+skipped rather than validated:
+  - Kasten/Kopia metadata files (kopia.*, xn0_*, _log_*) — legitimately small
+  - S3 TestEvent notifications — AWS's one-time health check, not a backup
 """
 import json
 import os
@@ -35,6 +36,20 @@ def is_metadata(key: str) -> bool:
     return False
 
 
+def is_test_event(body: dict) -> bool:
+    """
+    Return True if the SQS body is an S3 TestEvent notification.
+
+    S3 sends this once when the bucket notification is first configured,
+    to verify it can reach the destination. It has no "Records" array
+    and no S3 object data.
+    """
+    return (
+        body.get("Service") == "Amazon S3"
+        or body.get("Event") == "s3:TestEvent"
+    )
+
+
 def handler(event, context):
     failures = 0
     checked = 0
@@ -46,6 +61,13 @@ def handler(event, context):
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
             print(f"ERROR: malformed SQS record ({exc}): {record}")
             failures += 1
+            continue
+
+        # Skip AWS S3 TestEvent notifications (sent once per notification
+        # configuration, for verification).
+        if is_test_event(body):
+            print(f"SKIP (S3 test event): {body.get('Event', 'unknown')}")
+            skipped += 1
             continue
 
         s3_records = body.get("Records")
@@ -83,7 +105,11 @@ def handler(event, context):
             else:
                 print(f"OK: {bucket}/{key} ({size} bytes)")
 
-    print(f"Validated {checked} object(s), skipped {skipped} metadata, {failures} failure(s)")
+    print(
+        f"Validated {checked} object(s), "
+        f"skipped {skipped} (metadata/test), "
+        f"{failures} failure(s)"
+    )
 
     if failures:
         raise RuntimeError(f"{failures} backup validation failure(s)")
