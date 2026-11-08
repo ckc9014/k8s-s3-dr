@@ -15,8 +15,11 @@ Cross-cluster disaster recovery lab: two Kind clusters running MongoDB, backed u
 - **Two independent validation layers:**
   - **AWS-side (automatic):** S3 `ObjectCreated` → SQS → Lambda checks each backup object's size; failures retry 3× and land in a DLQ
   - **Cluster-side (manual):** Kasten CR statuses + MongoDB document count
+- **Application-consistent backups:** A Kanister Blueprint wraps each snapshot
+    with MongoDB `fsyncLock` / `fsyncUnlock` hooks, so backups are
+    transactionally whole — not just crash-consistent.
 - **Two workflows, same infrastructure:**
-  - **Scripted** (`make e2e` → `make dr`): fully automated DR cycle
+  - **Scripted** (`make e2e` → `make dr`): fully automated  DR cycle
   - **UI-driven** (`make infra`): no policies pre-created; backup, export, import, and restore are performed in the Kasten UI
 
 ## Architecture
@@ -524,6 +527,7 @@ k8s-s3-dr/
         ├── k10-values.yaml           # Helm values for K10 install
         ├── s3-secret.yaml            # S3 credentials (rendered by envsubst)
         ├── location-profile.yaml     # Kasten Location Profile
+        ├── mongodb-blueprint.yaml
         ├── backup-policy.yaml        # Source cluster backup policy
         ├── import-policy.yaml        # Restore cluster import policy
         ├── run-action.yaml           # Trigger backup policy
@@ -538,6 +542,7 @@ k8s-s3-dr/
 |---|---|---|---|
 | **AWS-side** | Lambda in AWS | S3 object exists, size ≥ `MIN_SIZE_BYTES` (64) | Automatic on `ObjectCreated` |
 | **Cluster-side** | `scripts/validate-backup.sh` | Kasten CR status + MongoDB doc count | Manual via `make validate-backup` |
+| **Blueprint** | Kasten → Kanister | MongoDB fsyncLock before snapshot, fsyncUnlock after | Automatic on every backup |
 
 The Lambda can't reach the Kind cluster (no network path from AWS to your laptop), so the two layers run independently. Together they cover:
 

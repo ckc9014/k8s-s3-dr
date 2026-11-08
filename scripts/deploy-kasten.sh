@@ -4,15 +4,16 @@
 #
 # SOURCE cluster  (CLUSTERS[0]):
 #   - K10 install
-#   - S3 secret + Location Profile
+#   - Location Profile
+#   - MongoDB Blueprint (fsyncLock/unlock hooks for app-consistent snapshots)
 #
 # RESTORE cluster (CLUSTERS[1]):
 #   - K10 install
-#   - S3 secret + Location Profile
+#   - Location Profile
+#   - MongoDB Blueprint (harmless; kept for consistency if the cluster
+#     later runs its own backups)
 #   - Bare app namespace with Kasten discovery label
-#
-# Does NOT create policies. See deploy-policies.sh for that.
-#
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -181,7 +182,7 @@ for cluster in "${CLUSTERS[@]}"; do
   wait_for_apiservice "$ctx" "v1alpha1.actions.kio.kasten.io"
   wait_for_apiservice "$ctx" "v1alpha1.apps.kio.kasten.io"
 
-  # 4. Wait for Kasten controllers
+  # 4a. Wait for Kasten controllers
   echo "-> waiting for gateway"
   kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
     deploy/gateway --timeout=300s
@@ -202,6 +203,16 @@ for cluster in "${CLUSTERS[@]}"; do
   kubectl --context "$ctx" -n "$K10_NAMESPACE" rollout status \
     deploy/controllermanager-svc --timeout=300s
 
+  # 4b. MongoDB backup blueprint (application-consistent snapshots) --------
+  # Applied to both clusters; only used by clusters that run backups.
+  if [ -f "manifests/kasten/mongodb-blueprint.yaml" ]; then
+    echo "-> applying MongoDB backup blueprint"
+    kubectl --context "$ctx" apply -f manifests/kasten/mongodb-blueprint.yaml
+  else
+    echo "   WARN: manifests/kasten/mongodb-blueprint.yaml not found — skipping"
+  fi
+
+  
   # 5. S3 Secret + Location Profile
   echo "-> applying S3 credentials secret"
   envsubst < "$K10_S3_SECRET" | kubectl --context "$ctx" apply -f -
@@ -259,8 +270,10 @@ echo ""
 echo "Kasten deployed. No policies created."
 echo "Verify:"
 echo "  kubectl --context kind-${SOURCE_CLUSTER} -n ${K10_NAMESPACE} get profile s3-backup-profile"
+echo "  kubectl --context kind-${SOURCE_CLUSTER} -n ${K10_NAMESPACE} get blueprints.cr.kanister.io"
 if [ -n "$RESTORE_CLUSTER" ]; then
   echo "  kubectl --context kind-${RESTORE_CLUSTER} -n ${K10_NAMESPACE} get profile s3-backup-profile"
+  echo "  kubectl --context kind-${RESTORE_CLUSTER} -n ${K10_NAMESPACE} get blueprints.cr.kanister.io"
 fi
 echo ""
 echo "Next: apply policies with 'make deploy-policies', or create them in the Kasten UI."

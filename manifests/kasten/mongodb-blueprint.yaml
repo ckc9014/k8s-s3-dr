@@ -1,0 +1,54 @@
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: mongodb-blueprint
+  namespace: kasten-io
+actions:
+  backupPrehook:
+    phases:
+      - func: KubeExec
+        name: lockMongo
+        objects:
+          mongoDbSecret:
+            kind: Secret
+            name: mongodb-root
+            namespace: '{{ .StatefulSet.Namespace }}'
+        args:
+          namespace: "{{ .StatefulSet.Namespace }}"
+          pod: "{{ index .StatefulSet.Pods 0 }}"
+          container: mongodb
+          command:
+            - bash
+            - -o
+            - errexit
+            - -o
+            - pipefail
+            - -c
+            - |
+              export MONGODB_ROOT_USER='{{ index .Phases.lockMongo.Secrets.mongoDbSecret.Data "username" | toString }}'
+              export MONGODB_ROOT_PASSWORD='{{ index .Phases.lockMongo.Secrets.mongoDbSecret.Data "password" | toString }}'
+              mongosh --authenticationDatabase admin -u "${MONGODB_ROOT_USER}" -p "${MONGODB_ROOT_PASSWORD}" --eval="db.fsyncLock()"
+  backupPosthook:
+    phases:
+      - func: KubeExec
+        name: unlockMongo
+        objects:
+          mongoDbSecret:
+            kind: Secret
+            name: mongodb-root
+            namespace: '{{ .StatefulSet.Namespace }}'
+        args:
+          namespace: "{{ .StatefulSet.Namespace }}"
+          pod: "{{ index .StatefulSet.Pods 0 }}"
+          container: mongodb
+          command:
+            - bash
+            - -o
+            - errexit
+            - -o
+            - pipefail
+            - -c
+            - |
+              export MONGODB_ROOT_USER='{{ index .Phases.unlockMongo.Secrets.mongoDbSecret.Data "username" | toString }}'
+              export MONGODB_ROOT_PASSWORD='{{ index .Phases.unlockMongo.Secrets.mongoDbSecret.Data "password" | toString }}'
+              mongosh --authenticationDatabase admin -u "${MONGODB_ROOT_USER}" -p "${MONGODB_ROOT_PASSWORD}" --eval="db.fsyncUnlock()"
